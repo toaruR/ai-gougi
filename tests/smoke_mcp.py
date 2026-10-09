@@ -1,6 +1,6 @@
 """早期 E2E スモーク: in-process MCP クライアントで stub claude に ask_claude('hello') を1回通す。
 
-使用法: python tests/smoke_mcp.py [--missing-bin] [--stdio] [--tool ask_claude|ask_codex|ask_agy]
+使用法: python tests/smoke_mcp.py [--missing-bin] [--stdio] [--tool ask_claude|ask_codex|ask_agy|deliberate] [--rounds N]
 --stdio は `python -m ai_gougi` を実 subprocess として stdio_client で起動する。
 isError でなければ終了コード0、isError なら1。
 """
@@ -94,7 +94,15 @@ async def stdio_session_call(params: StdioServerParameters, calls):
     return results
 
 
-def smoke_stdio(tool: str = "ask_claude", missing_bin: bool = False, prompt: str = "hello"):
+def smoke_stdio(tool: str = "ask_claude", missing_bin: bool = False, prompt: str = "hello",
+                rounds: int | None = None):
+    if tool == "deliberate":
+        args = {"theme": "t"}
+        if rounds is not None:
+            args["rounds"] = rounds
+        with tempfile.TemporaryDirectory() as td:
+            params = stdio_params(td, {n: "echo_stdin" for n in _ms.NAMES})
+            return anyio.run(stdio_session_call, params, [(tool, args)])[0]
     part = tool.removeprefix("ask_")
     with tempfile.TemporaryDirectory() as td:
         modes = {n: "echo_stdin" for n in _ms.NAMES}
@@ -109,11 +117,12 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--missing-bin", action="store_true")
     ap.add_argument("--stdio", action="store_true")
-    ap.add_argument("--tool", choices=["ask_claude", "ask_codex", "ask_agy"],
+    ap.add_argument("--tool", choices=["ask_claude", "ask_codex", "ask_agy", "deliberate"],
                     default="ask_claude")
+    ap.add_argument("--rounds", type=int, default=None)
     a = ap.parse_args(argv)
     if a.stdio:
-        res = smoke_stdio(a.tool, a.missing_bin)
+        res = smoke_stdio(a.tool, a.missing_bin, rounds=a.rounds)
     elif a.tool != "ask_claude":
         ap.error("--tool requires --stdio")
     else:

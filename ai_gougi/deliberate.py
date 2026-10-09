@@ -71,7 +71,18 @@ async def run_deliberate(
                         requested, 1, None, t0, rounds_out)
         if s1 < c.MIN_SUCCESS_R2 and requested >= 2:
             return _out("partial", None, None, requested, 1, "S1_BELOW_MIN", t0, rounds_out)
-        # 暫定: R2 未実装。S1>=MIN_SUCCESS_R2 は R1 結果のみ返す(後続タスクで置換)
         all_ok = s1 == need
-        status = "ok" if requested == 1 and all_ok else "partial"
-        return _out(status, None, None, requested, 1, None, t0, rounds_out)
+        executed = 1
+        if requested >= 2:
+            ok_names = [r["participant"] for r in r1 if r["ok"]]
+            opinions = {r["participant"]: r["stdout"] for r in r1 if r["ok"]}
+            prompts = {
+                n: build_r2_prompt(theme, n, {k: v for k, v in opinions.items() if k != n})
+                for n in ok_names
+            }
+            r2 = await _run_round(run_cli_fn, tuple(ok_names), prompts, pool)
+            rounds_out.append({"round": 2, "results": r2})
+            executed = 2
+            all_ok = all_ok and all(r["ok"] for r in r2)
+        status = "ok" if executed == requested and all_ok else "partial"
+        return _out(status, None, None, requested, executed, None, t0, rounds_out)

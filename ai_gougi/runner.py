@@ -13,8 +13,12 @@ from typing import Optional, Union
 
 from .cmdline import apply_newline, check_cmdline_len
 from .config import Config, get_config
+from .killtree import kill_tree
+from .logging_util import log_decode_replaced
 from .schema import AskResult, make_ask_result, make_prelaunch_error
 from .slots import SlotPool
+from .snapshot import Snapshot, compare_snapshots, take_snapshot
+from .truncate import truncate_output, truncate_stderr
 
 POOL = SlotPool()
 
@@ -94,6 +98,23 @@ def prelaunch(
     return LaunchPlan(participant, argv, stdin_text, devnull, held, c)
 
 
+def _child_env(c: Config) -> dict:
+    env = dict(os.environ)
+    for item in c.CHILD_ENV_EXTRA.split(","):
+        k, sep, v = item.strip().partition("=")
+        if sep and k:
+            env[k] = v
+    return env
+
+
+async def _read_into(stream, buf: bytearray) -> None:
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            return
+        buf.extend(chunk)
+
+
 async def _feed_stdin(proc, data: Optional[bytes]) -> None:
     if proc.stdin is None or data is None:
         return
@@ -105,8 +126,23 @@ async def _feed_stdin(proc, data: Optional[bytes]) -> None:
         pass
 
 
+def _decode(b: bytes, c: Config, who: str) -> str:
+    try:
+        return b.decode(c.ENCODING)
+    except UnicodeDecodeError:
+        log_decode_replaced(who)
+        return b.decode(c.ENCODING, errors="replace")
+
+
+def _snapshot(c: Config) -> Snapshot:
+    try:
+        return take_snapshot(c.WORKDIR, c)
+    except (ValueError, OSError):
+        return Snapshot(skipped=True)
+
+
 async def _execute(plan: LaunchPlan) -> AskResult:
-    """実行段A: 起動・stdin/EOF/DEVNULL・ok 判定。タイムアウト/切詰め/snapshot は後続タスク。"""
+    """実行段A+B: 起動・stdin/EOF・TIMEOUT 待機・kill_tree・decode・切詰め・snapshot・ok 判定。"""
     c = plan.cfg
     p = plan.participant
     t0 = time.monotonic()
@@ -114,10 +150,12 @@ async def _execute(plan: LaunchPlan) -> AskResult:
     def ms() -> int:
         return int((time.monotonic() - t0) * 1000)
 
+    before = _snapshot(c)
     try:
         proc = await asyncio.create_subprocess_exec(
             *plan.argv,
             cwd=c.WORKDIR,
+            env=_child_env(c),
             stdin=asyncio.subprocess.DEVNULL if plan.stdin_devnull else asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -128,24 +166,53 @@ async def _execute(plan: LaunchPlan) -> AskResult:
             error_code="SPAWN_FAILED", error_message=f"{type(e).__name__}: {e}",
         )
 
+    out_buf, err_buf = bytearray(), bytearray()
     data = plan.stdin_text.encode(c.ENCODING) if plan.stdin_text is not None else None
-    feeder = asyncio.ensure_future(_feed_stdin(proc, data))
-    out_b, err_b = await asyncio.gather(proc.stdout.read(), proc.stderr.read())
-    await proc.wait()
-    await feeder
+    all_t = [
+        asyncio.ensure_future(_feed_stdin(proc, data)),
+        asyncio.ensure_future(_read_into(proc.stdout, out_buf)),
+        asyncio.ensure_future(_read_into(proc.stderr, err_buf)),
+        asyncio.ensure_future(proc.wait()),
+    ]
 
-    stdout = out_b.decode(c.ENCODING, errors="replace")
-    stderr = err_b.decode(c.ENCODING, errors="replace")
+    # 部分出力を保持するため communicate() ではなく自前 reader + asyncio.wait(timeout)
+    _, pending = await asyncio.wait(all_t, timeout=c.TIMEOUT_SEC)
+    timed_out = bool(pending)
+    if timed_out:
+        await kill_tree(proc, c)
+        # kill 後、パイプ閉鎖(読取完了)を KILL_WAIT_SEC まで待つ。部分出力は保持。
+        rest = [t for t in all_t if not t.done()]
+        if rest:
+            _, pending = await asyncio.wait(rest, timeout=c.KILL_WAIT_SEC)
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.wait(pending, timeout=1)
+    for t in all_t:
+        if t.done() and not t.cancelled():
+            t.exception()  # 未取得例外の警告抑止
+
+    stdout = _decode(bytes(out_buf), c, f"{p} stdout")
+    stderr = _decode(bytes(err_buf), c, f"{p} stderr")
+    stdout_t, out_total, out_trunc = truncate_output(stdout, c)
+    stderr_t, err_total, err_trunc = truncate_stderr(stderr, c)
+
     code = proc.returncode
-    ok = code == 0 and bool(stdout.strip())
+    wcheck = compare_snapshots(before, _snapshot(c))
+
+    ok = (not timed_out) and code == 0 and bool(stdout.strip())
     error_code = error_message = None
-    if code != 0:
+    if timed_out:
+        error_code, error_message = "TIMEOUT", f"timed out after {c.TIMEOUT_SEC}s"
+    elif code != 0:
         error_code, error_message = "NONZERO_EXIT", f"exit code {code}"
     elif not ok:
         error_code, error_message = "EMPTY_OUTPUT", "stdout is empty"
     return make_ask_result(
-        p, ok=ok, exit_code=code, stdout=stdout, stderr=stderr,
-        duration_ms=ms(), workdir_check="skipped",
+        p, ok=ok, exit_code=code, stdout=stdout_t, stderr=stderr_t,
+        stdout_total_chars=out_total, stderr_total_chars=err_total,
+        stdout_truncated=out_trunc, stderr_truncated=err_trunc,
+        timed_out=timed_out, duration_ms=ms(), workdir_check=wcheck,
         error_code=error_code, error_message=error_message,
     )
 

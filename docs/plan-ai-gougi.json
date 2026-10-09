@@ -1,0 +1,2219 @@
+{
+ "plan_version": 1,
+ "summary": "設計書 AI-Gougi(Python+FastMCP、3CLIラッパーと合議)を 27 タスクの DAG で実装する。ID 昇順=トポロジカル順=リスク順で、Kahn 法 smallest-id-first の実行順と一致する(各タスクの依存は全て小さい ID)。順序: T001 config、T002 spike(実CLI/taskkill を探査し .strict-goal/scratch/probe_report.json を出力、以降の分岐ゲート)、T003 scripts/check_task_commit.py(コミット規約の機械検査)、T004 taskkill ツリー kill(最初の高リスク単位。T002 のレポートが taskkill_available=true なら実 kill ノードが権威的、false なら counterpart ノードのみ権威的)、T005 cmdline/agy argv(レポートの clis.agy.ext が .cmd/.exe/不在かで権威的分岐と E の実測源が決まる)、T006 schema、T007 FastMCP 骨格、T008 stub 基盤、T009-T010 slots/logging、T011-T012 run_cli 前処理/実行A、T013 早期 E2E スモーク(in-process MCP クライアント+stub bin で ask_claude を1回。骨格 T007・run_cli T012・stub T008 が揃う最早点)、T014-T016 純粋ユニットと prompts、T017-T019 run_cli 実行B/限界値/agy、T020-T023 deliberate、T024 実配線、T025-T026 stdio の完全版 E2E(最後)、T027 AT/F 網羅マップ。ロールバック規約: one git commit per task, commit message 'T0xx: <title>'。revert point = そのタスク自身のコミットの直前のコミット。非リーフのタスクを revert するには、その依存先(後続)タスクを逆トポロジカル順(ID の大きい順)に先に revert する。リーフの `git revert` は全スイート green のまま。機械検査: `python scripts/check_task_commit.py T0xx --green`(subject 'T0xx:' のコミット存在かつ `python -m pytest -q` green)と `--revert-check`(一時 worktree で自コミットを revert しても green)を各タスクの verify に置き、コミット後に実行する。T001/T002 は script より前なので T003 の verify が遡及検査する。runner.py は T011(前処理)・T012(実行A)・T017(実行B)の3回、deliberate.py は T020(R1/S1打切り)・T021(R2/status判定)の2回触る。理由: 各層を追加のみで増やし、前層の試験は後層が置換する暫定挙動に依存しないので各コミット直後に全スイートが green、短時間 stub だけで先に検証でき、1コミットを小さく保って revert 単位を細かくするため。Windows 限定 skip(AT-05/12/18/21/22/24)は sys.platform 条件(taskkill は real_kill_enabled)でのみ、非skip の counterpart ノード(argv/env/flag 構築層)を各 Windows 限定タスクに置く。負例: 27 タスクが期待 exit 非0 の verify を持つ(関数名と試験名を acceptance に明記、stub 失敗モードは stub_run.py/smoke_mcp.py で終了コード1)。受入検証: 各タスクに collect-only と acceptance が引用する全 node id の明示列挙(欠落は exit 4)を置いた。設計カバレッジ: 全見出し、F1-F28(F21-F28 は not guarded として T027 が自動検査)、AT-01..AT-24、8節の全行、(A)-(H) を design_refs に割り当てた。スコープ外(パッケージング/配布、CI、運用手順書、認証管理、ラウンド3自動化、他ラウンド制御ツール、永続化)は実装せず T027 で不在を確認する。",
+ "assumptions": [
+  "python 3.13, pytest 8.3.5, mcp(FastMCP, 1.26.0 想定), jsonschema 4.23.0, git が導入済み。依存管理ファイルは追加しない(パッケージング スコープ外)。",
+  "各タスクは完了時点で import 可能かつ該当 pytest と全スイートが green。追加した関数は後続が呼ぶまで未使用でも import を壊さない。",
+  "ロールバック: one git commit per task, commit message 'T0xx: <title>'。revert point = そのタスク自身のコミットの直前のコミット。非リーフの revert は依存先(後続)タスクを逆トポロジカル順に先に revert してから行う。リーフの `git revert` は全スイート green のまま。`python scripts/check_task_commit.py T0xx --green` / `--revert-check` で機械検査する(コミット後に実行)。",
+  "検証ホストは win32(この workspace: Windows 11)。sys.platform 条件の試験は win32 では実行され skip 0件が期待値。非win32 では skip された node は green 要件ではなく、各 Windows 限定タスクが acceptance で引用する platform 非依存の counterpart node(argv/env/flag 構築層)のみが権威的。Windows 限定タスクでは non-win32 の skip node は green 要件外、counterpart node は要件内。",
+  "T002 の spike は非失敗(CLI 不在でも終了コード0)。出力 probe_report.json は T004(taskkill_available)と T005(clis.agy.ext/exe_len)の分岐ゲートで、レポート不在時は live 探査/既定(AGY_EXE_LEN_REF=38、両分岐が権威的)にフォールバックする。AT スイートは実 CLI を使わず stub を使う。",
+  "agy の .exe 経路は python.exe に argv を解釈させられないため実spawnではなく argv 構築層(cmdline.py)で AT-18 を検証する。",
+  "タイムアウト系試験は TIMEOUT_SEC=3, KILL_WAIT_SEC=2(T_max(1)=5, T_max(2)=10)、負例コマンドは --timeout 1 --kill-wait 1 を env 上書きして実行時間を抑える。",
+  "AT-11/AT-16 等は単体層と統合層の両方で検証するため design_refs が複数タスクに重複する。試験関数名(node id)・関数名(t_max, take_snapshot, newline_policy 等)は本計画が定める名前で、実装タスクがその名前で作成する。",
+  "推定ラウンドは全タスク2以下、変更ファイル数は各タスク5以下。"
+ ],
+ "tasks": [
+  {
+   "id": "T001",
+   "title": "config.py: 既定値表と導出記号、pytest足場",
+   "intent": "設計書3節の既定値表を ai_gougi/config.py に実装する。全行を環境変数 AI_GOUGI_<名前> で上書き可能にし、呼び出しごとに環境を読む(キャッシュしない)ので monkeypatch で試験できる。導出記号 P/T_max(r)/keep/W2/N_safe/x_lim/返却量上限(H)を関数として提供する。tests/conftest.py に pytest marker 'at'(AT-nn 対応付け用)を登録する。後続全タスクの土台であり、このタスク完了時点で import と pytest が通る状態にする。 数値の上書き値が整数に変換できなければ get_config() は ValueError を送出し、関数 t_max(r) は r が 1..MAX_ROUNDS の範囲外なら ValueError を送出する(設計(A): r≤MAX_ROUNDS)。",
+   "design_refs": [
+    "# AI-Gougi 設計書",
+    "## 1. 背景と目的",
+    "## 3. 既定値表（全閾値・設定値・書式リテラルの唯一の定義箇所）",
+    "導出記号（定義のみ）",
+    "| TIMEOUT_SEC | 600 |",
+    "| BIN_claude / BIN_codex / BIN_agy |",
+    "| (A) T_max(r) |",
+    "| (H) 返却量 |"
+   ],
+   "depends_on": [],
+   "changes": [
+    {
+     "path": "ai_gougi/__init__.py",
+     "kind": "add",
+     "note": "パッケージ化。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "ai_gougi/config.py",
+     "kind": "add",
+     "note": "既定値表+env上書き+導出関数。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/conftest.py",
+     "kind": "add",
+     "note": "marker at 登録。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_config.py",
+     "kind": "add",
+     "note": "既定値・上書き・導出値。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_config.py::test_defaults_match_table] get_config() の既定値(時間): TIMEOUT_SEC=600, KILL_WAIT_SEC=5",
+    "[tests/test_config.py::test_defaults_match_table] get_config() の既定値(長さ): PROMPT_MAX_CHARS=7000, CMDLINE_MAX_CHARS=8000, AGY_EXE_LEN_REF=38, CMDLINE_FIXED_CHARS=6, THEME_MAX_CHARS=1500, OPINION_MAX_CHARS=2000",
+    "[tests/test_config.py::test_defaults_match_table] get_config() の既定値(出力/件数): OUTPUT_MAX_CHARS=20000, STDERR_MAX_CHARS=4000, MAX_ROUNDS=2, DEFAULT_ROUNDS=2, MAX_CONCURRENT_PROCS=3, SNAPSHOT_MAX_FILES=5000",
+    "[tests/test_config.py::test_env_override] 環境変数 AI_GOUGI_TIMEOUT_SEC=3 を setenv すると get_config().TIMEOUT_SEC==3、AI_GOUGI_CHILD_ENV_EXTRA='' で空文字(無効化)になる",
+    "[tests/test_config.py::test_t_max_and_derived] T_max(1)==605 かつ T_max(2)==1210、TIMEOUT_SEC=3/KILL_WAIT_SEC=2 のとき T_max(1)==5, T_max(2)==10、keep==1980、W2==6000",
+    "[tests/test_config.py::test_order_exclude_taskkill_workdir] PARTICIPANT_ORDER==('claude','codex','agy') かつ SNAPSHOT_EXCLUDE==('.git','node_modules')",
+    "[tests/test_config.py::test_order_exclude_taskkill_workdir] TASKKILL_FLAGS=='/T /F' であり、WORKDIR は起動時cwdの絶対パスである",
+    "[tests/test_config.py::test_return_cap_H] 返却量上限(H)が 3×2×(20000+4000)==144000 を返す",
+    "[tests/test_config.py::test_marker_at_registered] tests/conftest.py が marker 'at' を登録し `pytest --strict-markers` で警告なく収集される",
+    "[tests/test_config.py::test_invalid_env_raises] AI_GOUGI_TIMEOUT_SEC='abc' のとき get_config() は ValueError を送出する",
+    "[tests/test_config.py::test_t_max_out_of_range_raises] t_max(0) と既定 MAX_ROUNDS=2 での t_max(3) は ValueError を送出する",
+    "[tests/test_config.py::test_t_max_out_of_range_raises] AI_GOUGI_MAX_ROUNDS=3 に上書きすると t_max(3)==1815 になる",
+    "[git log --format=%s; retro-checked by T003 verify] commit with subject 'T001:' exists and suite green",
+    "[git log --format=%s; retro-checked by T003 verify] revert point = the commit immediately before T001's own commit; T001 has dependents, so revert them in reverse topological order (highest id first: 26 transitive dependents T027..T002) before reverting T001"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_config.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.config\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"import os;os.environ['AI_GOUGI_TIMEOUT_SEC']='abc';from ai_gougi.config import get_config;get_config()\"",
+     "expect_exit_code": 1,
+     "note": "負例: 整数変換不能な上書き値で get_config が ValueError、終了コード1"
+    },
+    {
+     "command": "python -c \"from ai_gougi.config import t_max;t_max(3)\"",
+     "expect_exit_code": 1,
+     "note": "負例: 既定 MAX_ROUNDS=2 で t_max(3) は ValueError、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_config.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_config.py::test_defaults_match_table\" \"tests/test_config.py::test_env_override\" \"tests/test_config.py::test_t_max_and_derived\" \"tests/test_config.py::test_order_exclude_taskkill_workdir\" \"tests/test_config.py::test_return_cap_H\" \"tests/test_config.py::test_marker_at_registered\" \"tests/test_config.py::test_invalid_env_raises\" \"tests/test_config.py::test_t_max_out_of_range_raises\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python -m pytest -q --strict-markers",
+     "expect_exit_code": 0,
+     "note": "全スイート green"
+    },
+    {
+     "command": "python -c \"import subprocess,sys;s=subprocess.check_output(['git','log','--format=%s'],text=True).splitlines();sys.exit(0 if any(x.startswith('T001:') for x in s) else 1)\"",
+     "expect_exit_code": 0,
+     "note": "自コミット(subject 'T001:')の存在。scripts/check_task_commit.py は T003 以降のため遡及検査は T003 の verify。コミット後に実行"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T002",
+   "title": "spike: 実CLI(claude/codex/agy)と taskkill を探査し probe_report.json を出力、後続の分岐ゲートにする",
+   "intent": "実装前提の探査スクリプト .strict-goal/scratch/probe_clis.py を作る。shutil.which('claude'/'codex'/'agy')、各 CLI の --version(timeout 付き)、taskkill の有無を調べ、機械可読レポート .strict-goal/scratch/probe_report.json({schema:1, platform, taskkill_available:bool, clis:{claude|codex|agy:{found,path,ext,exe_len,version}}})と人間可読ログ cli_probe.log を出力する。CLI が不在でも終了コード0(AI_GOUGI_PROBE_FORCE_MISSING=1 で不在を強制可、--out/--log で出力先変更、--validate PATH でレポートを検証し不正/不在は終了コード1)。tests/probe_gate.py に load_probe_report(path=None)、real_kill_enabled(report=None)(Windows かつ taskkill_available が真)、agy_branch(report=None)('cmd'/'exe'/'unknown')、authoritative_agy_branches(report=None)(('cmd',)/('exe',)/('cmd','exe'))、agy_exe_len(report=None)(found なら exe_len、不在なら AGY_EXE_LEN_REF=38)を実装する。T004(taskkill)と T005(agy argv)はこのレポートを分岐ゲートとして使う。AT スイート自体は実CLIを使わず stub を使う。",
+   "design_refs": [
+    "## 4. CLI起動仕様（Windows）",
+    "| claude | `[BIN_claude, \"-p\", \"--permission-mode\", \"plan\"]` | stdin(UTF-8) |"
+   ],
+   "depends_on": [
+    "T001"
+   ],
+   "changes": [
+    {
+     "path": ".strict-goal/scratch/probe_clis.py",
+     "kind": "add",
+     "note": "探査と probe_report.json / cli_probe.log 出力、--validate/--out/--log"
+    },
+    {
+     "path": "tests/probe_gate.py",
+     "kind": "add",
+     "note": "レポート読込と分岐ゲート関数(T004/T005 が import)"
+    },
+    {
+     "path": "tests/test_probe_gate.py",
+     "kind": "add",
+     "note": "スクリプトとゲート関数の試験"
+    }
+   ],
+   "acceptance": [
+    "[python .strict-goal/scratch/probe_clis.py] claude/codex/agy が PATH に無くても終了コード0で終了する",
+    "[python .strict-goal/scratch/probe_clis.py] probe_report.json に clis.claude/codex/agy それぞれの found/path/ext/exe_len/version と taskkill_available(bool)が書かれる",
+    "[python .strict-goal/scratch/probe_clis.py --validate .strict-goal/scratch/probe_report.json] 生成済みレポートの検証が終了コード0で通る",
+    "[python .strict-goal/scratch/probe_clis.py --validate .strict-goal/scratch/no_such_report.json] 存在しないレポートの検証は終了コード1(負例)",
+    "[tests/test_probe_gate.py::test_force_missing_all_found_false] AI_GOUGI_PROBE_FORCE_MISSING=1 では3 CLI 全てが found=False, path=None, ext=None で記録され終了コード0",
+    "[tests/test_probe_gate.py::test_validate_rejects_inconsistent_report] found=true なのに path=null のレポートは --validate が終了コード1を返す",
+    "[tests/test_probe_gate.py::test_log_line_per_cli] cli_probe.log に3 CLI それぞれ1行(found=...)が追記される",
+    "[tests/test_probe_gate.py::test_real_kill_enabled_follows_report] report の taskkill_available が true(かつ Windows)なら real_kill_enabled(report) が True、false なら False",
+    "[tests/test_probe_gate.py::test_agy_branch_follows_report] clis.agy.ext が '.cmd' なら agy_branch=='cmd'・authoritative_agy_branches==('cmd',)、'.exe' なら 'exe'・('exe',)",
+    "[tests/test_probe_gate.py::test_agy_branch_follows_report] agy 不在(ext が null)なら agy_branch=='unknown'・authoritative_agy_branches==('cmd','exe')",
+    "[tests/test_probe_gate.py::test_agy_exe_len_from_report] agy が found なら agy_exe_len(report) は report の exe_len、不在なら AGY_EXE_LEN_REF=38",
+    "[git log --format=%s; retro-checked by T003 verify] commit with subject 'T002:' exists and suite green",
+    "[git log --format=%s; retro-checked by T003 verify] revert point = the commit immediately before T002's own commit; T002 has dependents, so revert them in reverse topological order (highest id first: 16 transitive dependents T027..T004) before reverting T002"
+   ],
+   "verify": [
+    {
+     "command": "python .strict-goal/scratch/probe_clis.py",
+     "expect_exit_code": 0,
+     "note": "探査が終了コード0(CLI 不在でも非失敗)"
+    },
+    {
+     "command": "python .strict-goal/scratch/probe_clis.py --validate .strict-goal/scratch/probe_report.json",
+     "expect_exit_code": 0,
+     "note": "生成レポートが検証を通る"
+    },
+    {
+     "command": "python -c \"import os,subprocess,sys;e=dict(os.environ,AI_GOUGI_PROBE_FORCE_MISSING='1');sys.exit(subprocess.call([sys.executable,'.strict-goal/scratch/probe_clis.py','--out','.strict-goal/scratch/probe_report_missing.json','--log','.strict-goal/scratch/cli_probe_missing.log'],env=e))\"",
+     "expect_exit_code": 0,
+     "note": "強制不在モードでも終了コード0(本番レポートは上書きしない)"
+    },
+    {
+     "command": "python .strict-goal/scratch/probe_clis.py --validate .strict-goal/scratch/no_such_report.json",
+     "expect_exit_code": 1,
+     "note": "負例: 存在しないレポートの検証は終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_probe_gate.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_probe_gate.py::test_force_missing_all_found_false\" \"tests/test_probe_gate.py::test_validate_rejects_inconsistent_report\" \"tests/test_probe_gate.py::test_log_line_per_cli\" \"tests/test_probe_gate.py::test_real_kill_enabled_follows_report\" \"tests/test_probe_gate.py::test_agy_branch_follows_report\" \"tests/test_probe_gate.py::test_agy_exe_len_from_report\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python -m pytest -q --strict-markers",
+     "expect_exit_code": 0,
+     "note": "全スイート green"
+    },
+    {
+     "command": "python -c \"import subprocess,sys;s=subprocess.check_output(['git','log','--format=%s'],text=True).splitlines();sys.exit(0 if any(x.startswith('T002:') for x in s) else 1)\"",
+     "expect_exit_code": 0,
+     "note": "自コミット(subject 'T002:')の存在。scripts/check_task_commit.py は T003 以降のため遡及検査は T003 の verify。コミット後に実行"
+    }
+   ],
+   "estimate_rounds": 1
+  },
+  {
+   "id": "T003",
+   "title": "scripts/check_task_commit.py: タスクコミット規約とロールバック境界の機械検査",
+   "intent": "ロールバック規約を機械検査する CLI scripts/check_task_commit.py(標準ライブラリのみ)を作る。`python scripts/check_task_commit.py T0xx` は `git log --format=%s` に 'T0xx:' で始まる subject が存在すれば終了コード0、無ければ1(T0011 や xT001 は T001 に一致しない)。`--green` を付けるとさらに全スイート `python -m pytest -q` が終了コード0のときだけ0。`--revert-check` は revert point(そのタスクの自コミットの直前のコミット)を表示し、一時 git worktree で自コミットを `git revert` して競合なく適用でき全スイートが green のときだけ0(非リーフで依存コミットが後続にある場合は競合/赤で1)。`--repo PATH`(既定 cwd)で対象リポジトリを指定する。`--self-test` は一時 git リポジトリ(T001/T002 相当のコミットと意図的に赤いコミット)で上記全分岐を検査し、全て期待通りなら0。使用法違反は2。T001/T002 はこのスクリプトより前に作られるため、本タスクの verify で T001/T002 を遡及検査する。",
+   "design_refs": [
+    "## 9. 受入テスト"
+   ],
+   "depends_on": [
+    "T001"
+   ],
+   "changes": [
+    {
+     "path": "scripts/check_task_commit.py",
+     "kind": "add",
+     "note": "CLI: T0xx / --green / --revert-check / --repo / --self-test"
+    },
+    {
+     "path": "tests/test_check_task_commit.py",
+     "kind": "add",
+     "note": "一時 git リポジトリでの関数・CLI 試験"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_check_task_commit.py::test_has_task_commit_matches_prefix_only] subject 'T001: a' は T001 に一致し、'xT001: a'・'T0011: a'・'T001 a'(コロン無し)は一致しない",
+    "[tests/test_check_task_commit.py::test_has_task_commit_missing_returns_false] 存在しない T999 に対する has_task_commit は False を返す",
+    "[tests/test_check_task_commit.py::test_suite_green_detects_failure] 一時リポジトリで通る試験なら suite_green が True、失敗する試験を足すと False",
+    "[tests/test_check_task_commit.py::test_revert_check_leaf_green] リーフのコミットを revert しても全スイートが green なら revert_check が True を返す",
+    "[tests/test_check_task_commit.py::test_revert_check_conflict_red] 後続コミットが同じ行を変更している非リーフの revert_check は False を返す",
+    "[tests/test_check_task_commit.py::test_cli_unknown_task_exit1] `--repo` 付きで存在しない T999 を指定すると CLI の終了コードが 1",
+    "[tests/test_check_task_commit.py::test_self_test_exit0] `--self-test` が終了コード0",
+    "[scripts/check_task_commit.py T999] 存在しないタスクのコミット検査は終了コード1(負例)",
+    "[scripts/check_task_commit.py --self-test] 一時 git リポジトリでの自己検査が終了コード0",
+    "[scripts/check_task_commit.py T001 --green] 遡及検査: T001 の subject 付きコミットが存在し全スイートが green",
+    "[scripts/check_task_commit.py T002 --green] 遡及検査: T002 の subject 付きコミットが存在し全スイートが green",
+    "[scripts/check_task_commit.py T003 --green] commit with subject 'T003:' exists and suite green",
+    "[scripts/check_task_commit.py T003 --revert-check] revert point = the commit immediately before T003's own commit; T003 has dependents, so revert them in reverse topological order (highest id first: 24 transitive dependents T027..T004) before reverting T003"
+   ],
+   "verify": [
+    {
+     "command": "python scripts/check_task_commit.py --self-test",
+     "expect_exit_code": 0,
+     "note": "自己検査"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T999",
+     "expect_exit_code": 1,
+     "note": "負例: 存在しないタスク"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T999 --revert-check",
+     "expect_exit_code": 1,
+     "note": "負例: 存在しないタスクの revert 検査"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T001 --green",
+     "expect_exit_code": 0,
+     "note": "遡及: T001 のコミットと green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T002 --green",
+     "expect_exit_code": 0,
+     "note": "遡及: T002 のコミットと green"
+    },
+    {
+     "command": "python -m pytest tests/test_check_task_commit.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_check_task_commit.py::test_has_task_commit_matches_prefix_only\" \"tests/test_check_task_commit.py::test_has_task_commit_missing_returns_false\" \"tests/test_check_task_commit.py::test_suite_green_detects_failure\" \"tests/test_check_task_commit.py::test_revert_check_leaf_green\" \"tests/test_check_task_commit.py::test_revert_check_conflict_red\" \"tests/test_check_task_commit.py::test_cli_unknown_task_exit1\" \"tests/test_check_task_commit.py::test_self_test_exit0\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T003 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T003:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T003 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T004",
+   "title": "killtree.py: taskkill /T /F によるツリーkillとKILL_WAIT回収",
+   "intent": "最危険領域の1つ(Windows taskkill ツリー kill)。ai_gougi/killtree.py に async kill_tree(proc) を実装する: `taskkill /PID <pid> TASKKILL_FLAGS` を実行(TASKKILL_FLAGS は env 上書き可)、KILL_WAIT_SEC 以内に proc を回収、回収不能でも例外にせず False を返して放置する(F28 not guarded)。Windows 限定試験は skipif(sys.platform!='win32') とし、非Windowsでは skip される旨をスキップ理由に残す。孫プロセス stub を使い /T 有無の差を検証する。 同期ヘルパー run_taskkill(pid, flags)->int(taskkill の終了コード、起動不能は非0)を kill_tree の下層に置く。 実 kill ノードの実行可否は tests/probe_gate.py の real_kill_enabled()(T002 の probe_report.json の taskkill_available と Windows 判定)で決め、skipif(not real_kill_enabled()) を付ける。 最初のリスク単位としてコミット検査(T003)の直後に置く。",
+   "design_refs": [
+    "超過時は `taskkill /PID <pid> TASKKILL_FLAGS` でツリーを kill",
+    "| F3 | kill後に子孫プロセスが残る",
+    "| F28 | kill後も回収できないプロセス",
+    "| TIMEOUT kill",
+    "| taskkill /T /F",
+    "| AT-22 | F3"
+   ],
+   "depends_on": [
+    "T001",
+    "T002",
+    "T003"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/killtree.py",
+     "kind": "add",
+     "note": "kill_tree。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/stubs/grandchild_stub.py",
+     "kind": "add",
+     "note": "孫を起動してハングするstub。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_killtree.py",
+     "kind": "add",
+     "note": "AT-22 差分試験。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_killtree.py::test_kill_tree_removes_grandchild] TASKKILL_FLAGS 既定('/T /F')で kill した後、孫プロセス PID が tasklist に存在しない(AT-22a)",
+    "[tests/test_killtree.py::test_taskkill_f_only_leaves_grandchild] TASKKILL_FLAGS='/F' では孫が残存し(AT-22b 対照)、テスト後に手動 taskkill で後始末される",
+    "[tests/test_killtree.py::test_kill_tree_unrecoverable_returns_false] kill_tree は KILL_WAIT_SEC 以内に回収できなければ False を返し例外を送出しない(回収不能プロセスは mock で再現)",
+    "[tests/test_killtree.py::test_win32_only_skip_reason] 非Windowsでは Windows 限定試験が skip され、スキップ理由に 'win32 only' が含まれる",
+    "[tests/test_killtree.py::test_marker_at_22] tests/test_killtree.py の試験関数に pytest.mark.at('AT-22') が付く",
+    "[tests/test_killtree.py::test_kill_tree_builds_taskkill_argv] (counterpart, 非skip) 非Windowsでも観測できる事実: kill_tree が組み立てる taskkill 引数列は ['taskkill','/PID',<pid>,'/T','/F'](subprocess をモックして assert)",
+    "[tests/test_killtree.py::test_kill_tree_builds_taskkill_argv] (counterpart, 非skip) TASKKILL_FLAGS='/F' では taskkill 引数列に '/T' が含まれない(subprocess をモックして assert)",
+    "[tests/test_killtree.py::test_kill_tree_builds_taskkill_argv] (counterpart, 非skip) 実 kill ノードの skip は real_kill_enabled() が False のときだけで、本 workspace では skip 0件を -rs 出力で確認する",
+    "[tests/test_killtree.py::test_run_taskkill_nonexistent_pid_nonzero] 存在しない PID に対する run_taskkill は非0を返し、kill_tree 全体は例外を投げず False 経路になる(非Windowsでも非0: taskkill 不在=起動不能)",
+    "[tests/test_killtree.py::test_gate_real_kill_follows_probe_report] if probe_report.json says taskkill_available is true (on Windows) then real-kill nodes test_kill_tree_removes_grandchild and test_taskkill_f_only_leaves_grandchild run unskipped and are authoritative",
+    "[tests/test_killtree.py::test_gate_real_kill_follows_probe_report] if probe_report.json says taskkill_available is false then real-kill nodes are skipped; only counterpart nodes test_kill_tree_builds_taskkill_argv and test_run_taskkill_nonexistent_pid_nonzero are authoritative",
+    "[scripts/check_task_commit.py T004 --green] commit with subject 'T004:' exists and suite green",
+    "[scripts/check_task_commit.py T004 --revert-check] revert point = the commit immediately before T004's own commit; T004 has dependents, so revert them in reverse topological order (highest id first: 8 transitive dependents T027..T017) before reverting T004",
+    "[scripts/check_task_commit.py T004 --green] non-win32: skipped nodes are not green-required; counterpart nodes are"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_killtree.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.killtree\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"import sys;from ai_gougi.killtree import run_taskkill;sys.exit(0 if run_taskkill(99999999,'/T /F')==0 else 1)\"",
+     "expect_exit_code": 1,
+     "note": "負例: 存在しない PID の taskkill は非0(スクリプトは終了コード1)"
+    },
+    {
+     "command": "python -m pytest tests/test_killtree.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_killtree.py::test_kill_tree_removes_grandchild\" \"tests/test_killtree.py::test_taskkill_f_only_leaves_grandchild\" \"tests/test_killtree.py::test_kill_tree_unrecoverable_returns_false\" \"tests/test_killtree.py::test_win32_only_skip_reason\" \"tests/test_killtree.py::test_marker_at_22\" \"tests/test_killtree.py::test_kill_tree_builds_taskkill_argv\" \"tests/test_killtree.py::test_run_taskkill_nonexistent_pid_nonzero\" \"tests/test_killtree.py::test_gate_real_kill_follows_probe_report\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_killtree.py::test_kill_tree_builds_taskkill_argv\" -q --strict-markers",
+     "expect_exit_code": 0,
+     "note": "非win32でも権威となる counterpart node のみを単独実行"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T004 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T004:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T004 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T005",
+   "title": "cmdline.py: list2cmdline長のB/N_safe/x_lim数式と改行規則",
+   "intent": "最危険領域の1つ(Windows コマンドライン長)を先頭で固める。ai_gougi/cmdline.py に E=len(list2cmdline([exe])) 実測、B=E+CMDLINE_FIXED_CHARS、N_safe=floor((CMDLINE_MAX_CHARS-B)/2)、x_lim(n0)=CMDLINE_MAX_CHARS-B-n0、実測 L=len(list2cmdline([exe,'-p',prompt])) の判定、および拡張子による改行規則(.cmd は LF を2字の \\n に置換、.exe は保持)を実装する。cmd.exe を起動せず数式と置換のみを純粋関数で検証する。 超過時は ValueError(CMDLINE_TOO_LONG)を送出する純粋関数 check_cmdline_len(exe, prompt) も提供する。 拡張子規則は newline_policy(ext)('.cmd'->'escape', '.exe'->'keep')で表す。どちらの分岐が権威的か・E の実測源は T002 の probe_report.json(tests/probe_gate.py の agy_branch/agy_exe_len)で決まる。",
+   "design_refs": [
+    "### 4.1 数式と検証（python で検算済み）",
+    "| (B1) N_safe |",
+    "| (B2) x_lim |",
+    "- (B) x の内訳（各+1）",
+    "agy は `list2cmdline(argv)` の実長 L が CMDLINE_MAX_CHARS を超えたら起動せず CMDLINE_TOO_LONG",
+    "| F5 | agy の argv が cmd.exe 上限超過",
+    "| F6 | agy `.cmd` で改行によりプロンプトが行切断",
+    "| CMDLINE 検査",
+    "| 改行置換(.cmd)",
+    "| AT-05 | F5",
+    "| AT-18 | F6"
+   ],
+   "depends_on": [
+    "T001",
+    "T002",
+    "T003"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/cmdline.py",
+     "kind": "add",
+     "note": "E,B,N_safe,x_lim,L判定,改行置換。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_cmdline.py",
+     "kind": "add",
+     "note": "境界値試験。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_cmdline.py::test_b_nsafe_xlim] E=AGY_EXE_LEN_REF=38 のとき B==44 かつ N_safe==3978、x_lim(7000)==956",
+    "[tests/test_cmdline.py::test_n_safe_boundary] 最悪形(空白1+引用符 n0-1)で n0=3978 のとき実測 L==7999 で通り、n0=3979 のとき L==8001 で CMDLINE_TOO_LONG 判定になる",
+    "[tests/test_cmdline.py::test_x_lim_quotes] n0=7000 で引用符を x=0 個/956個含む prompt は L==7044/8000 で通り、957個は L==8001 で拒否される",
+    "[tests/test_cmdline.py::test_newline_rule_by_ext] 拡張子 .cmd では LF が2文字のリテラル バックスラッシュ+n に置換され(1字→2字)、.exe では実改行が保持される(拡張子の大文字小文字を区別しない)",
+    "[tests/test_cmdline.py::test_newline_xlim_boundary] 改行を x_lim 個/ +1 個含む .cmd 用 prompt でも置換後の実測 L が 8000/8001 になる",
+    "[tests/test_cmdline.py::test_e_measured_not_ref] E は which 解決後の実パスから実測され、AGY_EXE_LEN_REF は検算テスト専用で実行時判定には使われない",
+    "[tests/test_cmdline.py::test_check_cmdline_len_raises] L>CMDLINE_MAX_CHARS(8000) の組合せで check_cmdline_len が ValueError、境界内では None を返す(負例を含む)",
+    "[tests/test_cmdline.py::test_gate_agy_branch_from_probe] if probe_report.json clis.agy.ext is '.cmd' then the .cmd branch (newline_policy=='escape', E taken from report exe_len) is authoritative",
+    "[tests/test_cmdline.py::test_gate_agy_branch_from_probe] if probe_report.json clis.agy.ext is '.exe' then the .exe branch (newline_policy=='keep', real newline kept) is authoritative",
+    "[tests/test_cmdline.py::test_gate_agy_branch_from_probe] if agy is absent (ext null) then AGY_EXE_LEN_REF=38 is used as E and both .cmd and .exe branches stay authoritative",
+    "[scripts/check_task_commit.py T005 --green] commit with subject 'T005:' exists and suite green",
+    "[scripts/check_task_commit.py T005 --revert-check] revert point = the commit immediately before T005's own commit; T005 has dependents, so revert them in reverse topological order (highest id first: 14 transitive dependents T027..T011) before reverting T005"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_cmdline.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.cmdline\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"from ai_gougi.cmdline import check_cmdline_len;check_cmdline_len('agy.cmd','a'*9000)\"",
+     "expect_exit_code": 1,
+     "note": "負例: コマンドライン長超過で check_cmdline_len が例外を送出し終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_cmdline.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_cmdline.py::test_b_nsafe_xlim\" \"tests/test_cmdline.py::test_n_safe_boundary\" \"tests/test_cmdline.py::test_x_lim_quotes\" \"tests/test_cmdline.py::test_newline_rule_by_ext\" \"tests/test_cmdline.py::test_newline_xlim_boundary\" \"tests/test_cmdline.py::test_e_measured_not_ref\" \"tests/test_cmdline.py::test_check_cmdline_len_raises\" \"tests/test_cmdline.py::test_gate_agy_branch_from_probe\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T005 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T005:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T005 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T006",
+   "title": "schema.py: 5.1 JSON Schema・TypedDict・結果ビルダー",
+   "intent": "ai_gougi/schema.py に設計書5.1の JSON Schema(AskResult/DeliberateOutput等)、TypedDict(AskResultClaude/Codex/Agy, DeliberateOutput)、結果ビルダー make_ask_result と起動前エラー用 make_prelaunch_error(ok=false, exit_code=null, workdir_check='skipped', 文字列空, 数値0, 真偽false, error_message に原因)、jsonschema による検証関数を実装する。不変条件 ok=true⇔error_code=null⇔error_message=null を検証する。設計書のコードブロックと同一性をテストで保証する。",
+   "design_refs": [
+    "## 5. ツール仕様",
+    "### 5.1 JSON Schema",
+    "### 5.3 エラー条件表（上から最初に当たる行を採用）",
+    "- 不変条件（スキーマで強制）",
+    "起動前エラー（INVALID_INPUT / PROMPT_TOO_LONG / CMDLINE_TOO_LONG / CLI_NOT_FOUND / BUSY）の ask_*",
+    "| AT-19 | F9"
+   ],
+   "depends_on": [
+    "T001",
+    "T003"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/schema.py",
+     "kind": "add",
+     "note": "schema dict, TypedDict, ビルダー, validate。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_schema.py",
+     "kind": "add",
+     "note": "設計書例の検証と負例。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_schema.py::test_schema_equals_design_block] tests が設計書5.1の ```json コードブロックから schema を抽出し、ai_gougi.schema.SCHEMA と dict 等価であることを assert する",
+    "[tests/test_schema.py::test_design_examples_valid] 設計書の3つの例(ok AskResult / ok DeliberateOutput / partial DeliberateOutput)が jsonschema Draft2020-12 で検証通過する",
+    "[tests/test_schema.py::test_negative_invariants] 負例が拒否される: ok=true かつ error_code='NONZERO_EXIT'、ok=false かつ error_code=null、error_code 非null かつ error_message=null",
+    "[tests/test_schema.py::test_prelaunch_error_fixed_values] make_prelaunch_error('claude','BUSY','msg') は ok=False, exit_code=None, workdir_check='skipped' を返す",
+    "[tests/test_schema.py::test_prelaunch_error_fixed_values] 同関数の戻り値は stdout==stderr=='' かつ stdout_total_chars==0, timed_out=False, duration_ms==0",
+    "[tests/test_schema.py::test_prelaunch_error_fixed_values] 同関数の戻り値は 5.1 スキーマに適合する",
+    "[tests/test_schema.py::test_unknown_participant_rejected] participant に 'gemini' など未知値を与えると検証に失敗する",
+    "[scripts/check_task_commit.py T006 --green] commit with subject 'T006:' exists and suite green",
+    "[scripts/check_task_commit.py T006 --revert-check] revert point = the commit immediately before T006's own commit; T006 has dependents, so revert them in reverse topological order (highest id first: 15 transitive dependents T027..T007) before reverting T006"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_schema.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.schema\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"import sys,jsonschema;from ai_gougi.schema import SCHEMA;sys.exit(0 if jsonschema.Draft202012Validator(SCHEMA).is_valid({'ok':True,'error_code':'NONZERO_EXIT'}) else 1)\"",
+     "expect_exit_code": 1,
+     "note": "負例: ok=true+error_code非null は不変条件違反で拒否(終了コード1)"
+    },
+    {
+     "command": "python -m pytest tests/test_schema.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_schema.py::test_schema_equals_design_block\" \"tests/test_schema.py::test_design_examples_valid\" \"tests/test_schema.py::test_negative_invariants\" \"tests/test_schema.py::test_prelaunch_error_fixed_values\" \"tests/test_schema.py::test_unknown_participant_rejected\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T006 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T006:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T006 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T007",
+   "title": "mcp_wrap.py: FastMCP ツール登録と _wrap(outputSchema/structuredContent/isError)",
+   "intent": "最危険領域の1つ(FastMCP の outputSchema・structuredContent・isError ラッピング)を早期に確定する。ai_gougi/mcp_wrap.py に build_server(run_cli_fn, run_deliberate_fn) を実装し、5.4の _wrap と4ツール(ask_claude/ask_codex/ask_agy/deliberate)を Annotated[CallToolResult, TypedDict] で登録する。run_cli/run_deliberate は注入式にして runner 未実装でもテスト可能にする。mcp.shared.memory のインメモリクライアントで tools/list と tools/call を検証する。 run_deliberate_fn=None のとき deliberate も登録するが呼出時は NotImplementedError を返す(runner より先に骨格を置くため)。_wrap は status も ok も持たない dict を ValueError で拒否する。",
+   "design_refs": [
+    "### 5.4 FastMCP ツール定義",
+    "def _wrap(r: dict) -> CallToolResult:",
+    "`mcp` 1.26.0 で outputSchema・`structuredContent`・`isError=true` を確認済み。",
+    "- `ask_*`: inputSchema=`AskInput`",
+    "- `deliberate`: inputSchema=`DeliberateInput`"
+   ],
+   "depends_on": [
+    "T006"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/mcp_wrap.py",
+     "kind": "add",
+     "note": "build_server と _wrap。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_mcp_wrap.py",
+     "kind": "add",
+     "note": "インメモリMCPクライアント試験。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_mcp_wrap.py::test_tools_list_four_with_schemas] tools/list が4ツール(ask_claude, ask_codex, ask_agy, deliberate)を返す",
+    "[tests/test_mcp_wrap.py::test_tools_list_four_with_schemas] tools/list の各ツールの outputSchema が非null",
+    "[tests/test_mcp_wrap.py::test_tools_list_four_with_schemas] ask_* の inputSchema は prompt(string)必須のみ、deliberate は theme 必須かつ rounds(integer)を持つ",
+    "[tests/test_mcp_wrap.py::test_iserror_and_structured_content] 注入した fake run_cli が ok=false の結果を返すと tools/call の isError==True になる",
+    "[tests/test_mcp_wrap.py::test_iserror_and_structured_content] 同呼出の structuredContent は fake が返した dict と等しい",
+    "[tests/test_mcp_wrap.py::test_iserror_and_structured_content] 同呼出の content[0].text を json.loads すると同じ dict になる(ensure_ascii=False で日本語が素通し)",
+    "[tests/test_mcp_wrap.py::test_ok_ask_not_error] ok=true の ask_* は isError==False",
+    "[tests/test_mcp_wrap.py::test_deliberate_status_iserror] deliberate は status=='failed' のときだけ isError==True、'ok' と 'partial' は False",
+    "[tests/test_mcp_wrap.py::test_participant_fixed_per_tool] ask_codex の outputSchema の participant は 'codex' に固定され、ask_agy は 'agy' に固定される",
+    "[tests/test_mcp_wrap.py::test_rounds_none_passthrough] rounds 省略時 run_deliberate_fn に rounds=None が渡る",
+    "[tests/test_mcp_wrap.py::test_wrap_rejects_malformed_result] _wrap({}) (status も ok も無い dict)は ValueError を送出する",
+    "[tests/test_mcp_wrap.py::test_wrap_rejects_malformed_result] _wrap({'ok': True}) は isError==False の CallToolResult を返す",
+    "[scripts/check_task_commit.py T007 --green] commit with subject 'T007:' exists and suite green",
+    "[scripts/check_task_commit.py T007 --revert-check] revert point = the commit immediately before T007's own commit; T007 has dependents, so revert them in reverse topological order (highest id first: T027, T026, T025, T024, T013) before reverting T007"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_mcp_wrap.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.mcp_wrap\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"from ai_gougi.mcp_wrap import _wrap;_wrap({})\"",
+     "expect_exit_code": 1,
+     "note": "負例: status も ok も無い結果は _wrap が ValueError、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_mcp_wrap.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_mcp_wrap.py::test_tools_list_four_with_schemas\" \"tests/test_mcp_wrap.py::test_iserror_and_structured_content\" \"tests/test_mcp_wrap.py::test_ok_ask_not_error\" \"tests/test_mcp_wrap.py::test_deliberate_status_iserror\" \"tests/test_mcp_wrap.py::test_participant_fixed_per_tool\" \"tests/test_mcp_wrap.py::test_rounds_none_passthrough\" \"tests/test_mcp_wrap.py::test_wrap_rejects_malformed_result\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T007 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T007:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T007 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T008",
+   "title": "tests/stubs: CLI stub と BIN_* 差し替えヘルパー",
+   "intent": "受入テスト用の stub CLI 基盤を作る。tests/stubs/stub_cli.py は環境変数で挙動を切替える(stdin全文/argvを出力、指定秒sleep、指定終了コード、任意バイト(0xFF)出力、cwd出力、ファイル作成、受信argvをJSONに記録、孫起動)。tests/stubs/make_stubs.py は一時ディレクトリに claude.cmd/codex.cmd/agy.cmd(および拡張子切替用の agy.exe 相当)を生成し AI_GOUGI_BIN_* を設定するフィクスチャを提供する。agy .exe の実spawn は python.exe に argv を解釈させられないため argv 構築層で検証する旨をテストに注記する。 挙動は環境変数 STUB_MODE(echo_stdin/exit1/sleep/bytes_ff/record_argv/print_cwd)で切替え、sleep の秒数は STUB_SLEEP_SEC、未知の STUB_MODE は終了コード2。 make_stubs.install_stubs(tmp_dir, mode) は AI_GOUGI_BIN_* の辞書を返す。",
+   "design_refs": [
+    "## 9. 受入テスト",
+    "stub を BIN_* で差し替える。値は 4.1 のもの。F 列は 7 節の失敗モード。"
+   ],
+   "depends_on": [
+    "T001",
+    "T003"
+   ],
+   "changes": [
+    {
+     "path": "tests/stubs/stub_cli.py",
+     "kind": "add",
+     "note": "挙動切替stub。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/stubs/make_stubs.py",
+     "kind": "add",
+     "note": "stub生成とBIN差替。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/stubs/__init__.py",
+     "kind": "add",
+     "note": "package。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_stubs.py",
+     "kind": "add",
+     "note": "stub自体の試験。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_stubs.py::test_echo_stdin_exit1_sleep] stub を subprocess で起動して mode=echo_stdin のとき stdin 全文をそのまま stdout に出力し、mode=exit1 は終了コード1、mode=sleep は指定秒後に終了する",
+    "[tests/test_stubs.py::test_bytes_ff_record_argv] mode=bytes_ff は stdout に 0xFF を含むバイト列を出力し、mode=record_argv は受信 argv を指定JSONファイルに書き出す",
+    "[tests/test_stubs.py::test_make_stubs_resolves_cmd_and_env] make_stubs が生成した claude.cmd を shutil.which で解決でき、AI_GOUGI_BIN_claude に絶対パスが設定される",
+    "[tests/test_stubs.py::test_print_cwd] stub は cwd を出力する mode=print_cwd を持ち、実行時 cwd と stdout が一致する",
+    "[tests/test_stubs.py::test_exit1_mode_exit_code_1] STUB_MODE=exit1 の stub CLI は終了コード1で終了する(失敗モード)",
+    "[tests/test_stubs.py::test_exit1_mode_exit_code_1] 未知の STUB_MODE の stub CLI は終了コード2で終了する",
+    "[scripts/check_task_commit.py T008 --green] commit with subject 'T008:' exists and suite green",
+    "[scripts/check_task_commit.py T008 --revert-check] revert point = the commit immediately before T008's own commit; T008 has dependents, so revert them in reverse topological order (highest id first: 10 transitive dependents T027..T012) before reverting T008"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_stubs.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import tests.stubs.make_stubs\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"import os,subprocess,sys;e=dict(os.environ,STUB_MODE='exit1');sys.exit(subprocess.call([sys.executable,'tests/stubs/stub_cli.py'],env=e))\"",
+     "expect_exit_code": 1,
+     "note": "負例: 失敗モードの stub CLI は終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_stubs.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_stubs.py::test_echo_stdin_exit1_sleep\" \"tests/test_stubs.py::test_bytes_ff_record_argv\" \"tests/test_stubs.py::test_make_stubs_resolves_cmd_and_env\" \"tests/test_stubs.py::test_print_cwd\" \"tests/test_stubs.py::test_exit1_mode_exit_code_1\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T008 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T008:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T008 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T009",
+   "title": "slots.py: 並列枠予約(G)",
+   "intent": "ai_gougi/slots.py に枠管理 SlotPool(max=MAX_CONCURRENT_PROCS)を実装する。try_reserve(need) は running+need ≤ MAX で受理し予約、release(n) で解放。await を挟まず検査と予約を原子的に行う。不一致なら BUSY(キュー待ちはしない)。 保持数を超える release(n) は ValueError を送出する(負数化の防止)。",
+   "design_refs": [
+    "| (G) 枠 |",
+    "| MAX_CONCURRENT_PROCS | 3 |",
+    "| F14 | 同時起動の過多",
+    "| BUSY",
+    "| AT-09 | F14"
+   ],
+   "depends_on": [
+    "T001",
+    "T003"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/slots.py",
+     "kind": "add",
+     "note": "SlotPool。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_slots.py",
+     "kind": "add",
+     "note": "(G)表と並列同時数。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_slots.py::test_reserve_table] (running,need)=(0,3),(1,3),(2,1),(3,1) の結果が 受理,BUSY,受理,BUSY になる",
+    "[tests/test_slots.py::test_release_no_negative] release 後に枠が戻り、予約→解放の繰り返しで running が負にならない(例外でも解放漏れしない context manager を提供)",
+    "[tests/test_slots.py::test_gather_10_max3] asyncio.gather で10並列に try_reserve(1) すると受理は最大3件で観測同時数 ≤ MAX_CONCURRENT_PROCS",
+    "[tests/test_slots.py::test_env_override_max1] AI_GOUGI_MAX_CONCURRENT_PROCS=1 に上書きすると (0,2) は BUSY になる",
+    "[tests/test_slots.py::test_release_underflow_raises] running=0 の SlotPool に release(1) すると ValueError を送出し running は 0 のまま",
+    "[scripts/check_task_commit.py T009 --green] commit with subject 'T009:' exists and suite green",
+    "[scripts/check_task_commit.py T009 --revert-check] revert point = the commit immediately before T009's own commit; T009 has dependents, so revert them in reverse topological order (highest id first: 14 transitive dependents T027..T011) before reverting T009"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_slots.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.slots\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"from ai_gougi.slots import SlotPool;SlotPool(3).release(1)\"",
+     "expect_exit_code": 1,
+     "note": "負例: 保持数超過の release は ValueError、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_slots.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_slots.py::test_reserve_table\" \"tests/test_slots.py::test_release_no_negative\" \"tests/test_slots.py::test_gather_10_max3\" \"tests/test_slots.py::test_env_override_max1\" \"tests/test_slots.py::test_release_underflow_raises\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T009 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T009:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T009 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T010",
+   "title": "logging_util.py: log系防御の stderr 1行記録",
+   "intent": "設計書8節で決定=log の機構が使う、サーバー stderr に1行記録して続行するロガーを ai_gougi/logging_util.py に実装する(stdout は MCP stdio プロトコル用なので使わない)。decode errors=replace 発生時、.cmd 改行置換発生時、git 管理外 WORKDIR での codex 起動(--skip-git-repo-check)、起動時の CHILD_ENV_EXTRA 有効値の記録関数を提供する。 log_event の kind は固定集合(decode_replaced/newline_replaced/nongit_workdir/startup_env)で、未知の kind は ValueError。",
+   "design_refs": [
+    "## 8. 防御機構のトレードオフ",
+    "reject=エラー返却、warn=結果のフィールドで通知して続行、log=サーバー stderr に1行記録して続行。",
+    "| decode errors=replace",
+    "| --skip-git-repo-check",
+    "| CHILD_ENV_EXTRA",
+    "| F12 | 文字化け・不正バイト",
+    "| F13 | 子CLI(Python製)の出力が cp932 になる"
+   ],
+   "depends_on": [
+    "T001",
+    "T003"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/logging_util.py",
+     "kind": "add",
+     "note": "1行stderrロガー。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_logging_util.py",
+     "kind": "add",
+     "note": "capsys試験。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_logging_util.py::test_log_event_stderr_one_line] log_event(kind, msg) は stderr に改行1つで終わる1行のみを書き、stdout には何も書かない",
+    "[tests/test_logging_util.py::test_startup_env_line] log_startup_env() は CHILD_ENV_EXTRA の有効値('PYTHONUTF8=1')を含む行を出し、空文字上書き時は '無効' を示す行を出す",
+    "[tests/test_logging_util.py::test_is_git_repo_and_nongit_log] is_git_repo(path) が git 管理外ディレクトリで False、tmp に .git を作ると True を返し、False のとき log_nongit_workdir が1行出す",
+    "[tests/test_logging_util.py::test_decode_newline_logs] log_decode_replaced と log_newline_replaced がそれぞれ1行を出す",
+    "[tests/test_logging_util.py::test_unknown_kind_raises] log_event('bogus','x') は ValueError を送出し、stderr に何も書かない",
+    "[scripts/check_task_commit.py T010 --green] commit with subject 'T010:' exists and suite green",
+    "[scripts/check_task_commit.py T010 --revert-check] revert point = the commit immediately before T010's own commit; T010 has dependents, so revert them in reverse topological order (highest id first: 14 transitive dependents T027..T011) before reverting T010"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_logging_util.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.logging_util\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"from ai_gougi.logging_util import log_event;log_event('bogus','x')\"",
+     "expect_exit_code": 1,
+     "note": "負例: 未知の kind は ValueError、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_logging_util.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_logging_util.py::test_log_event_stderr_one_line\" \"tests/test_logging_util.py::test_startup_env_line\" \"tests/test_logging_util.py::test_is_git_repo_and_nongit_log\" \"tests/test_logging_util.py::test_decode_newline_logs\" \"tests/test_logging_util.py::test_unknown_kind_raises\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T010 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T010:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T010 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T011",
+   "title": "runner.py(前半): run_cli の起動前検証とargv構築・エラー優先順位",
+   "intent": "ai_gougi/runner.py の run_cli 起動前段を実装する。5.3の優先順位(INVALID_INPUT→PROMPT_TOO_LONG→BUSY→CLI_NOT_FOUND→CMDLINE_TOO_LONG)を厳守し、起動前エラーは make_prelaunch_error を返し予約は解放する。BIN_* は shutil.which で絶対パス化(PATH外は env で絶対パス上書き)し、4節の表どおり claude/codex/agy の argv を構築する。agy は E 実測→cmdline で判定。deliberate 用に reserved=True(枠確保済み)の引数を持つ。実際の subprocess 起動は次タスク。",
+   "design_refs": [
+    "## 4. CLI起動仕様（Windows）",
+    "| claude | `[BIN_claude, \"-p\", \"--permission-mode\", \"plan\"]` | stdin(UTF-8) |",
+    "| ask_* | INVALID_INPUT | prompt が空白のみ |",
+    "| ask_* | PROMPT_TOO_LONG |",
+    "| 全 | CLI_NOT_FOUND |",
+    "| ask_agy | CMDLINE_TOO_LONG |",
+    "| F1 | CLI未インストール/PATH不備",
+    "| F4 | 長すぎるプロンプト",
+    "| PROMPT_MAX_CHARS / THEME_MAX_CHARS",
+    "| which 解決",
+    "| AT-20 | F1,F2,F4,F14"
+   ],
+   "depends_on": [
+    "T005",
+    "T006",
+    "T009",
+    "T010"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/runner.py",
+     "kind": "add",
+     "note": "prelaunch検証とargv構築。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_runner_prelaunch.py",
+     "kind": "add",
+     "note": "AT-20 a-d、argv表。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_runner_prelaunch.py::test_input_validation_bounds] prompt が空白のみは INVALID_INPUT、7001字は PROMPT_TOO_LONG、7000字は検証を通過する(起動前段のみ)",
+    "[tests/test_runner_prelaunch.py::test_at20_priority_a_to_d] AT-20(a): 空白のみ prompt と BUSY が同時に成立するとき error_code は INVALID_INPUT",
+    "[tests/test_runner_prelaunch.py::test_at20_priority_a_to_d] AT-20(b): 7001字 prompt と BUSY が同時に成立するとき error_code は PROMPT_TOO_LONG",
+    "[tests/test_runner_prelaunch.py::test_at20_priority_a_to_d] AT-20(c): BUSY と BIN 未解決が同時に成立するとき error_code は BUSY",
+    "[tests/test_runner_prelaunch.py::test_at20_priority_a_to_d] AT-20(d): agy で BIN 未解決と CMDLINE 長超過が同時に成立するとき error_code は CLI_NOT_FOUND",
+    "[tests/test_runner_prelaunch.py::test_cli_not_found_message] BIN_codex を存在しないパスにすると CLI_NOT_FOUND、error_message に BIN 名が含まれ起動0回",
+    "[tests/test_runner_prelaunch.py::test_argv_table] argv 構築結果は claude が [abs,'-p','--permission-mode','plan']",
+    "[tests/test_runner_prelaunch.py::test_argv_table] argv 構築結果は codex が [abs,'exec','--sandbox','read-only','--skip-git-repo-check','-']",
+    "[tests/test_runner_prelaunch.py::test_argv_table] argv 構築結果は agy が [abs,'-p',prompt] で、agy のみ stdin=DEVNULL 指定を返す",
+    "[tests/test_runner_prelaunch.py::test_agy_cmdline_too_long_releases] agy は E 実測の B を使い、n0≤N_safe なら CMDLINE_TOO_LONG にならず、L>8000 なら CMDLINE_TOO_LONG で予約が解放される",
+    "[tests/test_runner_prelaunch.py::test_slot_restored_on_prelaunch_error] 起動前エラー時 SlotPool の running が呼出し前と同じ値に戻る",
+    "[scripts/check_task_commit.py T011 --green] commit with subject 'T011:' exists and suite green",
+    "[scripts/check_task_commit.py T011 --revert-check] revert point = the commit immediately before T011's own commit; T011 has dependents, so revert them in reverse topological order (highest id first: 13 transitive dependents T027..T012) before reverting T011"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_runner_prelaunch.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.runner\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"import asyncio,os,sys;os.environ['AI_GOUGI_BIN_codex']=r'Z:\\nope\\codex.cmd';from ai_gougi.runner import run_cli;r=asyncio.run(run_cli('codex','hi'));sys.exit(0 if r['ok'] else 1)\"",
+     "expect_exit_code": 1,
+     "note": "負例: BIN未解決は CLI_NOT_FOUND(ok=false) で終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_runner_prelaunch.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_runner_prelaunch.py::test_input_validation_bounds\" \"tests/test_runner_prelaunch.py::test_at20_priority_a_to_d\" \"tests/test_runner_prelaunch.py::test_cli_not_found_message\" \"tests/test_runner_prelaunch.py::test_argv_table\" \"tests/test_runner_prelaunch.py::test_agy_cmdline_too_long_releases\" \"tests/test_runner_prelaunch.py::test_slot_restored_on_prelaunch_error\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T011 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T011:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T011 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T012",
+   "title": "runner.py(実行段A): subprocess起動・stdin/EOF/DEVNULL・ok判定・SPAWN_FAILED",
+   "intent": "run_cli の実行段の前半を実装する。asyncio.create_subprocess_exec(shell=False)、cwd=WORKDIR、stdout/stderr=PIPE、stdin 経路(claude/codex)は UTF-8 書込後 close(EOF)、agy は stdin=DEVNULL、plan mode 系フラグ付き argv の起動、ok=(exit0 かつ stdout.strip非空 かつ not timed_out) と error_code(NONZERO_EXIT/EMPTY_OUTPUT/SPAWN_FAILED)判定、予約解放。タイムアウト・kill・切り詰め・snapshot・decode は次タスクで追加する(このタスクでは短時間で終了する stub のみ試験)。 併せて tests/stubs/stub_run.py(使用法: `stub_run.py PARTICIPANT MODE [--prompt-len N] [--quote-count Q] [--timeout S] [--kill-wait S]`)を作る。 一時 stub を install_stubs で用意して run_cli を1回実行し、結果JSONを stdout に出し、ok なら終了コード0、そうでなければ1。スクリプト先頭で repo root を sys.path に追加する。",
+   "design_refs": [
+    "共通規約:",
+    "6. 成功判定 `ok` = (exit_code==0)",
+    "| 全 | SPAWN_FAILED |",
+    "| 全 | EMPTY_OUTPUT |",
+    "| F10 | claude/codex が stdin 待ちで停止",
+    "| F11 | agy が stdin 待ちで停止",
+    "| F16 | claude が WORKDIR に書込",
+    "| F17 | codex が WORKDIR に書込",
+    "| F18 | git 管理外 WORKDIR で codex が起動拒否",
+    "| F20 | 空応答を成功扱い",
+    "| EMPTY_OUTPUT",
+    "| stdin EOF / DEVNULL",
+    "| plan mode 系フラグ",
+    "| AT-02 | F9,F20",
+    "| AT-15 | F10,F11",
+    "| AT-23 | F16,F17,F18"
+   ],
+   "depends_on": [
+    "T008",
+    "T011"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/runner.py",
+     "kind": "modify",
+     "note": "実行段A追加。partial: 追記のみで prelaunch 経路は不変。タイムアウト未実装の間は短時間stubのみ"
+    },
+    {
+     "path": "tests/test_runner_exec.py",
+     "kind": "add",
+     "note": "AT-02/15/23。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/stubs/stub_run.py",
+     "kind": "add",
+     "note": "run_cli を stub で1回実行する CLI(失敗モードの終了コード検証に使う)"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_runner_exec.py::test_at02_ok_and_empty] AT-02: claude stub が exit0 で 'hello' を出すと ok=True, stdout=='hello', error_code is None",
+    "[tests/test_runner_exec.py::test_at02_ok_and_empty] AT-02: claude stub が exit0 で空白のみを出すと ok=False, error_code=='EMPTY_OUTPUT'",
+    "[tests/test_runner_exec.py::test_at15_stdin_eof_devnull] AT-15: claude/codex stub は stdin 全文を受信し、agy stub は stdin が即EOF(空)で、いずれもハングしない",
+    "[tests/test_runner_exec.py::test_at23_plan_flags_argv] AT-23: claude stub の記録 argv が ['-p','--permission-mode','plan']",
+    "[tests/test_runner_exec.py::test_at23_plan_flags_argv] AT-23: codex stub の記録 argv が ['exec','--sandbox','read-only','--skip-git-repo-check','-']",
+    "[tests/test_runner_exec.py::test_nonzero_and_spawn_failed] exit1 の stub は error_code=='NONZERO_EXIT' で stdout/stderr を返す",
+    "[tests/test_runner_exec.py::test_nonzero_and_spawn_failed] 存在しない実行ファイルを OSError で起動不能にすると error_code=='SPAWN_FAILED' で error_message に例外文が入る",
+    "[tests/test_runner_exec.py::test_slot_released_all_paths] 全経路の完了後に SlotPool の running が 0 に戻る",
+    "[tests/test_runner_exec.py::test_stub_run_cli_exit_codes] stub_run.py は ok 結果で終了コード0、NONZERO_EXIT 結果で終了コード1を返し、結果JSONを stdout に1つ出力する",
+    "[scripts/check_task_commit.py T012 --green] commit with subject 'T012:' exists and suite green",
+    "[scripts/check_task_commit.py T012 --revert-check] revert point = the commit immediately before T012's own commit; T012 has dependents, so revert them in reverse topological order (highest id first: 9 transitive dependents T027..T013) before reverting T012"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_runner_exec.py -q -rs --strict-markers",
+     "expect_exit_code": 0,
+     "note": "pytest green (skip は sys.platform!='win32' のみ。本workspaceはwin32)"
+    },
+    {
+     "command": "python -c \"import ai_gougi.runner\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python tests/stubs/stub_run.py claude echo_stdin",
+     "expect_exit_code": 0,
+     "note": "stub_run: 成功は終了コード0"
+    },
+    {
+     "command": "python tests/stubs/stub_run.py claude exit1",
+     "expect_exit_code": 1,
+     "note": "負例: NONZERO_EXIT は終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_runner_exec.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_runner_exec.py::test_at02_ok_and_empty\" \"tests/test_runner_exec.py::test_at15_stdin_eof_devnull\" \"tests/test_runner_exec.py::test_at23_plan_flags_argv\" \"tests/test_runner_exec.py::test_nonzero_and_spawn_failed\" \"tests/test_runner_exec.py::test_slot_released_all_paths\" \"tests/test_runner_exec.py::test_stub_run_cli_exit_codes\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T012 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T012:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T012 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T013",
+   "title": "早期 E2E スモーク: in-process MCP クライアントで stub claude に ask_claude を1回通す",
+   "intent": "FastMCP 骨格(T007)・実 run_cli(T011-T012)・stub 基盤(T008)が揃う最早点で、配線全体の最小スモークを置く。tests/smoke_mcp.py は build_server(run_cli, None) を mcp.shared.memory のインメモリクライアントで接続し、stub の claude に ask_claude('hello') を1回送って結果を表示する。CLI: `python tests/smoke_mcp.py [--missing-bin]`(isError でなければ0、isError なら1)。--missing-bin は BIN_claude を存在しないパスにして失敗経路を作る。完全版の E2E(stdio、AT-19/01/02/10)は T025-T026 で最後に置く。",
+   "design_refs": [
+    "## 2. アーキテクチャ",
+    "`ask_*` は `run_cli` 1回",
+    "| AT-02 | F9,F20"
+   ],
+   "depends_on": [
+    "T007",
+    "T008",
+    "T012"
+   ],
+   "changes": [
+    {
+     "path": "tests/smoke_mcp.py",
+     "kind": "add",
+     "note": "in-process スモーク CLI/関数"
+    },
+    {
+     "path": "tests/test_smoke_mcp.py",
+     "kind": "add",
+     "note": "スモークの試験"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_smoke_mcp.py::test_smoke_ask_claude_in_process] in-process MCP クライアントで stub claude に ask_claude('hello') を送ると isError==False",
+    "[tests/test_smoke_mcp.py::test_smoke_ask_claude_in_process] 同呼出の structuredContent は participant=='claude', stdout=='hello' で 5.1 スキーマに適合する",
+    "[tests/test_smoke_mcp.py::test_smoke_missing_bin_is_error] BIN_claude を存在しないパスにすると isError==True かつ error_code=='CLI_NOT_FOUND'",
+    "[python tests/smoke_mcp.py] スモーク CLI が終了コード0",
+    "[python tests/smoke_mcp.py --missing-bin] 失敗経路(--missing-bin)では isError により終了コード1(負例)",
+    "[scripts/check_task_commit.py T013 --green] commit with subject 'T013:' exists and suite green",
+    "[scripts/check_task_commit.py T013 --revert-check] revert point = the commit immediately before T013's own commit; T013 has dependents, so revert them in reverse topological order (highest id first: T027, T026, T025) before reverting T013"
+   ],
+   "verify": [
+    {
+     "command": "python tests/smoke_mcp.py",
+     "expect_exit_code": 0,
+     "note": "スモーク成功"
+    },
+    {
+     "command": "python tests/smoke_mcp.py --missing-bin",
+     "expect_exit_code": 1,
+     "note": "負例: BIN 未解決で isError、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_smoke_mcp.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_smoke_mcp.py::test_smoke_ask_claude_in_process\" \"tests/test_smoke_mcp.py::test_smoke_missing_bin_is_error\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T013 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T013:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T013 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T014",
+   "title": "truncate.py: OPINION/OUTPUT/STDERR 切り詰めとマーカー",
+   "intent": "ai_gougi/truncate.py に truncate_opinion(text)(keep=1980、超過時 先頭 keep 字+MARKER_FORMAT で k を明示)、truncate_output(stdout, 先頭を残す)、truncate_stderr(末尾を残す)を実装し total_chars と truncated を返す。マーカー長 m(k)=10+桁数、全体が OPINION_MAX_CHARS 以下であること、keep+k=len の往復を保証する。 文字列以外の入力は TypeError を送出する。",
+   "design_refs": [
+    "| (C) 切り詰め |",
+    "| (E) 出力 |",
+    "マーカー長の境界（len = keep + k、合計 = keep + m(k)）",
+    "| MARKER_FORMAT |",
+    "| MARKER_RESERVE |",
+    "| F7 | 巨大出力で呼び出し側が溢れる",
+    "| OUTPUT 切り詰め",
+    "| OPINION 切り詰め",
+    "| AT-06 | F7",
+    "| AT-11 | F19"
+   ],
+   "depends_on": [
+    "T001",
+    "T003"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/truncate.py",
+     "kind": "add",
+     "note": "truncate系。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_truncate.py",
+     "kind": "add",
+     "note": "(C)(E)と境界表。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_truncate.py::test_opinion_lengths] len=2000 は原文のまま、len=2001 は k=21 で合計長1992、2500 は k=520、20000 は k=18020(合計1995)",
+    "[tests/test_truncate.py::test_marker_boundary_table] マーカー境界表の7行(k=21,99,100,999,1000,10000,18020)で合計長が 1992,1992,1993,1993,1994,1995,1995 になる",
+    "[tests/test_truncate.py::test_marker_boundary_table] 同7行で合計長が全て OPINION_MAX_CHARS(2000)以下かつ m(k) ≤ MARKER_RESERVE(20)",
+    "[tests/test_truncate.py::test_roundtrip_keep_plus_k] 全入力で先頭 keep 文字+k==len(元長) の往復が成立する",
+    "[tests/test_truncate.py::test_output_stderr_truncation] stdout 20000字は無切り詰め、20001字は先頭20000字+truncated=True+total=20001、stderr 4001字は末尾4000字を残し truncated=True",
+    "[tests/test_truncate.py::test_marker_at_06_11] tests の試験関数に pytest.mark.at('AT-06') と pytest.mark.at('AT-11') が付く(AT-11は truncate 層の単体観点)",
+    "[tests/test_truncate.py::test_invalid_input_raises] truncate_opinion(None) と truncate_opinion(123) は TypeError、空文字列は '' を返す",
+    "[scripts/check_task_commit.py T014 --green] commit with subject 'T014:' exists and suite green",
+    "[scripts/check_task_commit.py T014 --revert-check] revert point = the commit immediately before T014's own commit; T014 has dependents, so revert them in reverse topological order (highest id first: 12 transitive dependents T027..T016) before reverting T014"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_truncate.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.truncate\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"from ai_gougi.truncate import truncate_opinion;truncate_opinion(None)\"",
+     "expect_exit_code": 1,
+     "note": "負例: 不正入力(None)で TypeError、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_truncate.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_truncate.py::test_opinion_lengths\" \"tests/test_truncate.py::test_marker_boundary_table\" \"tests/test_truncate.py::test_roundtrip_keep_plus_k\" \"tests/test_truncate.py::test_output_stderr_truncation\" \"tests/test_truncate.py::test_marker_at_06_11\" \"tests/test_truncate.py::test_invalid_input_raises\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T014 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T014:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T014 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T015",
+   "title": "snapshot.py: WORKDIR 書込検知(changed/unchanged/skipped)",
+   "intent": "ai_gougi/snapshot.py に WORKDIR のスナップショット(相対パス→mtime_ns,size)取得と比較を実装する。SNAPSHOT_EXCLUDE(.git,node_modules)を除外し、ファイル数が SNAPSHOT_MAX_FILES を超えたら走査を打ち切り workdir_check='skipped'。検知のみで予防はしない(F23)。 take_snapshot(root) は root が存在するディレクトリでなければ ValueError を送出する。",
+   "design_refs": [
+    "| SNAPSHOT_MAX_FILES | 5000 |",
+    "| SNAPSHOT_EXCLUDE |",
+    "| F15 | agy が WORKDIR 内を書換（読取専用フラグなし）",
+    "| 書込 snapshot",
+    "| AT-12 | F15"
+   ],
+   "depends_on": [
+    "T001",
+    "T003"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/snapshot.py",
+     "kind": "add",
+     "note": "take/compare。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_snapshot.py",
+     "kind": "add",
+     "note": "AT-12 a-c 単体。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_snapshot.py::test_changed_unchanged] ファイル作成後の比較は 'changed'、変更なしは 'unchanged'",
+    "[tests/test_snapshot.py::test_skipped_over_max_files] SNAPSHOT_MAX_FILES+1 個のファイルがある WORKDIR は 'skipped'(env で上限を小さくして再現)",
+    "[tests/test_snapshot.py::test_excludes_ignored] .git と node_modules 配下の変更は無視され 'unchanged' になる",
+    "[tests/test_snapshot.py::test_delete_modify_changed] ファイル削除・内容変更(size/mtime)も 'changed' になる",
+    "[tests/test_snapshot.py::test_nonexistent_root_raises] 存在しないパスに対する take_snapshot は ValueError を送出する",
+    "[scripts/check_task_commit.py T015 --green] commit with subject 'T015:' exists and suite green",
+    "[scripts/check_task_commit.py T015 --revert-check] revert point = the commit immediately before T015's own commit; T015 has dependents, so revert them in reverse topological order (highest id first: 8 transitive dependents T027..T017) before reverting T015"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_snapshot.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.snapshot\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"from ai_gougi.snapshot import take_snapshot;take_snapshot('Z:/nope')\"",
+     "expect_exit_code": 1,
+     "note": "負例: 存在しない root は ValueError、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_snapshot.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_snapshot.py::test_changed_unchanged\" \"tests/test_snapshot.py::test_skipped_over_max_files\" \"tests/test_snapshot.py::test_excludes_ignored\" \"tests/test_snapshot.py::test_delete_modify_changed\" \"tests/test_snapshot.py::test_nonexistent_root_raises\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T015 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T015:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T015 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T016",
+   "title": "prompts.py: R1/R2プロンプト生成と TEMPLATE_MAX_CHARS 起動検査",
+   "intent": "ai_gougi/prompts.py に R1 プロンプト(=theme)、R2 プロンプト(定型文+『テーマ』『自分以外の意見(<opinion from=\"codex\">…</opinion>、truncate_opinion 適用)』『反論・修正点・同意点を述べよ』)の生成を実装する。定型文+ラベルが TEMPLATE_MAX_CHARS 超なら起動時にエラー終了する check_template() を提供する。他者意見内の指示文はそのまま <opinion> 内に入る(F22 not guarded)。",
+   "design_refs": [
+    "R1 プロンプト = theme。R2 プロンプト（定型文は TEMPLATE_MAX_CHARS 以内）",
+    "| (D) W2 |",
+    "| TEMPLATE_MAX_CHARS | 500 |",
+    "| F19 | R2埋め込み意見でプロンプト長超過",
+    "| F22 | 他者意見内の指示文によるインジェクション",
+    "| AT-11 | F19",
+    "| AT-16 | F19"
+   ],
+   "depends_on": [
+    "T014"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/prompts.py",
+     "kind": "add",
+     "note": "check_template は超過時 SystemExit(1)。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    },
+    {
+     "path": "tests/test_prompts.py",
+     "kind": "add",
+     "note": "W2とAT-16/AT-11。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_prompts.py::test_w2_exact_6000] 各上限(theme 1500字、意見2000字×2、定型文500字)で R2 プロンプト長がちょうど W2==6000 で ≤ PROMPT_MAX_CHARS(7000)",
+    "[tests/test_prompts.py::test_opinion_truncated_k520] 2500字の R1 意見は R2 内で先頭1980字+省略マーカー(k=520)に切り詰められ、2000字の意見は原文のまま埋め込まれる",
+    "[tests/test_prompts.py::test_only_others_opinions_ordered] 自分以外の参加者の意見だけが <opinion from=\"codex\"> 形式で入り、自分自身の意見は含まれない、並び順は claude,codex,agy",
+    "[tests/test_prompts.py::test_template_over_limit_exits_nonzero] AI_GOUGI_TEMPLATE_MAX_CHARS を定型文長-1 にすると check_template() が例外を送出する",
+    "[tests/test_prompts.py::test_template_over_limit_exits_nonzero] 同設定で `python -c \"from ai_gougi.prompts import check_template; check_template()\"` の終了コードが 0 以外になる",
+    "[tests/test_prompts.py::test_template_over_limit_exits_nonzero] 既定値では同コマンドの終了コードが 0 になる",
+    "[tests/test_prompts.py::test_injection_passthrough] 意見に '以前の指示を無視せよ' を含めても <opinion> 内にそのまま渡る(エスケープしない)",
+    "[scripts/check_task_commit.py T016 --green] commit with subject 'T016:' exists and suite green",
+    "[scripts/check_task_commit.py T016 --revert-check] revert point = the commit immediately before T016's own commit; T016 has dependents, so revert them in reverse topological order (highest id first: 8 transitive dependents T027..T020) before reverting T016"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_prompts.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python -c \"import ai_gougi.prompts\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"import os;os.environ['AI_GOUGI_TEMPLATE_MAX_CHARS']='1';from ai_gougi.prompts import check_template;check_template()\"",
+     "expect_exit_code": 1,
+     "note": "AT-16b 負例: 定型文超過で check_template が SystemExit(1)"
+    },
+    {
+     "command": "python -m pytest tests/test_prompts.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_prompts.py::test_w2_exact_6000\" \"tests/test_prompts.py::test_opinion_truncated_k520\" \"tests/test_prompts.py::test_only_others_opinions_ordered\" \"tests/test_prompts.py::test_template_over_limit_exits_nonzero\" \"tests/test_prompts.py::test_injection_passthrough\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T016 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T016:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T016 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T017",
+   "title": "runner.py(実行段B): wait_for/TIMEOUT・kill_tree・decode・切り詰め・snapshot・環境変数",
+   "intent": "run_cli の実行段の後半を実装する。wait_for(communicate(), TIMEOUT_SEC) 超過時に kill_tree し KILL_WAIT_SEC 以内に回収して timed_out=true・部分出力保持・error_code=TIMEOUT、decode errors=replace(発生時 log)、truncate 適用(stdout 先頭/stderr 末尾)、実行前後の snapshot による workdir_check、環境は継承+CHILD_ENV_EXTRA の組立を追加する。",
+   "design_refs": [
+    "5. 待機は `wait_for(communicate(), TIMEOUT_SEC)`",
+    "| 全 | TIMEOUT |",
+    "| F2 | CLIのハング",
+    "| F12 | 文字化け・不正バイト",
+    "| F13 | 子CLI(Python製)の出力が cp932 になる",
+    "| AT-03 | F2",
+    "| AT-14 | F12"
+   ],
+   "depends_on": [
+    "T004",
+    "T010",
+    "T012",
+    "T014",
+    "T015"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/runner.py",
+     "kind": "modify",
+     "note": "実行段B追加。partial: 追記のみ、A段の挙動は不変"
+    },
+    {
+     "path": "tests/test_runner_exec_kill.py",
+     "kind": "add",
+     "note": "AT-03/14。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_runner_exec_kill.py::test_at03_timeout_kill_duration] AT-03: TIMEOUT_SEC=3, KILL_WAIT_SEC=2 で長時間sleep stub は error_code=='TIMEOUT' かつ timed_out=True",
+    "[tests/test_runner_exec_kill.py::test_at03_timeout_kill_duration] AT-03: 同条件で 3000 ≤ duration_ms ≤ 5000(T_max(1)=5秒)",
+    "[tests/test_runner_exec_kill.py::test_at14_utf8_roundtrip_and_replace] AT-14: 日本語『日本語』の入力が stdin 経由で往復一致し、stub が出す 0xFF は U+FFFD になり例外0件",
+    "[tests/test_runner_exec_kill.py::test_partial_output_kept_on_timeout] タイムアウト時も kill 前に出力された部分 stdout が保持され、孫を持つ stub でもプロセスが残らず KILL_WAIT_SEC 以内に回収される",
+    "[tests/test_runner_exec_kill.py::test_workdir_check_and_truncate_applied] stub の出力が OUTPUT_MAX_CHARS 超なら切り詰めが適用される",
+    "[tests/test_runner_exec_kill.py::test_workdir_check_and_truncate_applied] ファイルを作る stub では workdir_check=='changed'、作らなければ 'unchanged'",
+    "[tests/test_runner_exec_kill.py::test_child_env_inherit_plus_extra] 子プロセス環境は親環境を継承し CHILD_ENV_EXTRA(PYTHONUTF8=1)が加わる",
+    "[python tests/stubs/stub_run.py claude sleep --timeout 1 --kill-wait 1] 長時間sleep stub は TIMEOUT(timed_out=true)で終了コード1(負例)",
+    "[scripts/check_task_commit.py T017 --green] commit with subject 'T017:' exists and suite green",
+    "[scripts/check_task_commit.py T017 --revert-check] revert point = the commit immediately before T017's own commit; T017 has dependents, so revert them in reverse topological order (highest id first: 7 transitive dependents T027..T018) before reverting T017"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_runner_exec_kill.py -q -rs --strict-markers",
+     "expect_exit_code": 0,
+     "note": "pytest green (skip は sys.platform!='win32' のみ。本workspaceはwin32)"
+    },
+    {
+     "command": "python -c \"import ai_gougi.runner\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python tests/stubs/stub_run.py claude bytes_ff",
+     "expect_exit_code": 0,
+     "note": "0xFF 出力は U+FFFD に置換され ok で終了コード0"
+    },
+    {
+     "command": "python tests/stubs/stub_run.py claude sleep --timeout 1 --kill-wait 1",
+     "expect_exit_code": 1,
+     "note": "負例: TIMEOUT で終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_runner_exec_kill.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_runner_exec_kill.py::test_at03_timeout_kill_duration\" \"tests/test_runner_exec_kill.py::test_at14_utf8_roundtrip_and_replace\" \"tests/test_runner_exec_kill.py::test_partial_output_kept_on_timeout\" \"tests/test_runner_exec_kill.py::test_workdir_check_and_truncate_applied\" \"tests/test_runner_exec_kill.py::test_child_env_inherit_plus_extra\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T017 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T017:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T017 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T018",
+   "title": "runner試験: 長さ制限・出力切詰・優先順位・環境変数",
+   "intent": "run_cli の限界値を stub で受入試験する(tests/test_runner_limits.py のみ追加。不具合は発見した時点で先行タスクの範囲で最小修正)。AT-04(PROMPT_MAX_CHARS 境界)、AT-06(OUTPUT/STDERR 切り詰め)、AT-20(e)(f)(TIMEOUT>NONZERO_EXIT、NONZERO_EXIT>EMPTY_OUTPUT)、AT-21(PYTHONUTF8 既定と空文字上書きの文字化け差)。",
+   "design_refs": [
+    "| AT-04 | F4",
+    "| AT-06 | F7",
+    "| AT-20 | F1,F2,F4,F14",
+    "| AT-21 | F13"
+   ],
+   "depends_on": [
+    "T017"
+   ],
+   "changes": [
+    {
+     "path": "tests/test_runner_limits.py",
+     "kind": "add",
+     "note": "AT-04/06/20/21。partial: テストのみ追加"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_runner_limits.py::test_at04_prompt_boundary] AT-04: prompt 7000字は受理され stub 起動、7001字は PROMPT_TOO_LONG で stub 起動回数0(argv記録ファイルが作られない)",
+    "[tests/test_runner_limits.py::test_at06_output_stderr_truncation] AT-06: stdout 20000字はそのまま返り stdout_truncated=False",
+    "[tests/test_runner_limits.py::test_at06_output_stderr_truncation] AT-06: stdout 20001字は stdout_truncated=True, stdout_total_chars==20001, 先頭20000字を返す",
+    "[tests/test_runner_limits.py::test_at06_output_stderr_truncation] AT-06: stderr 4001字は末尾4000字を残して stderr_truncated=True",
+    "[tests/test_runner_limits.py::test_at20ef_priority] AT-20(e): timeout+非0終了は TIMEOUT、(f): 非0終了+空stdout は NONZERO_EXIT",
+    "[tests/test_runner_limits.py::test_at21_pythonutf8_win32] AT-21: 親環境に PYTHONUTF8 無しで Python 製 stub が『日本語』を print し、既定 CHILD_ENV_EXTRA では stdout=='日本語'",
+    "[tests/test_runner_limits.py::test_at21_pythonutf8_win32] AT-21: AI_GOUGI_CHILD_ENV_EXTRA='' では stdout が '日本語' と一致しない(文字化け)。Windows 限定は skipif",
+    "[tests/test_runner_limits.py::test_child_env_construction] (counterpart, 非skip) 子プロセス環境の構築層は既定で PYTHONUTF8=1 を含む(Popen に渡す env dict を assert)",
+    "[tests/test_runner_limits.py::test_child_env_construction] (counterpart, 非skip) AI_GOUGI_CHILD_ENV_EXTRA='' では環境構築層が PYTHONUTF8 を含まない",
+    "[tests/test_runner_limits.py::test_child_env_construction] (counterpart, 非skip) AT-21 の文字化け実測は win32 のみで skipif(sys.platform!='win32')、本workspaceは win32 で skip 0件を -rs で確認",
+    "[python tests/stubs/stub_run.py claude echo_stdin --prompt-len 7001] PROMPT_MAX_CHARS+1 字の prompt は PROMPT_TOO_LONG で終了コード1(負例)",
+    "[scripts/check_task_commit.py T018 --green] commit with subject 'T018:' exists and suite green",
+    "[scripts/check_task_commit.py T018 --revert-check] revert point = the commit immediately before T018's own commit; T018 has dependents, so revert them in reverse topological order (highest id first: T027, T026, T025) before reverting T018",
+    "[scripts/check_task_commit.py T018 --green] non-win32: skipped nodes are not green-required; counterpart nodes are"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_runner_limits.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python tests/stubs/stub_run.py claude echo_stdin --prompt-len 7000",
+     "expect_exit_code": 0,
+     "note": "境界ちょうど 7000 字は受理され終了コード0"
+    },
+    {
+     "command": "python tests/stubs/stub_run.py claude echo_stdin --prompt-len 7001",
+     "expect_exit_code": 1,
+     "note": "負例: 7001 字は PROMPT_TOO_LONG、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_runner_limits.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_runner_limits.py::test_at04_prompt_boundary\" \"tests/test_runner_limits.py::test_at06_output_stderr_truncation\" \"tests/test_runner_limits.py::test_at20ef_priority\" \"tests/test_runner_limits.py::test_at21_pythonutf8_win32\" \"tests/test_runner_limits.py::test_child_env_construction\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_runner_limits.py::test_child_env_construction\" -q --strict-markers",
+     "expect_exit_code": 0,
+     "note": "非win32でも権威となる counterpart node のみを単独実行"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T018 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T018:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T018 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T019",
+   "title": "runner試験: agy 経路(.cmd改行/cmdline境界/snapshot/%展開/auth失敗)",
+   "intent": "agy の経路を .cmd stub で受入試験する(Windows 限定は skipif(sys.platform!='win32') で非Windowsでは skip、理由を明記)。AT-05(spawn して L=8000 通る/8001 拒否)、AT-12(a-d)、AT-18(.cmd は LF が2字 \\n、.exe は argv 構築層で実改行保持)、AT-24(a)(c)(d)。F21(%CD% 展開)・F23・F27 は not guarded の現状記述どおりの挙動を固定する。",
+   "design_refs": [
+    "| AT-05 |",
+    "| AT-12 |",
+    "| AT-18 | F6",
+    "| AT-24 | F21,F22,F23,F27",
+    "| F21 | agy `.cmd` で `%VAR%` が cmd.exe に展開される",
+    "| F23 | agy 書込の予防／plan mode の抜け穴",
+    "| F27 | CLIの認証切れ"
+   ],
+   "depends_on": [
+    "T005",
+    "T015",
+    "T017"
+   ],
+   "changes": [
+    {
+     "path": "tests/test_runner_agy.py",
+     "kind": "add",
+     "note": "AT-05/12/18/24。partial: テストのみ追加"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_runner_agy.py::test_at05_cmdline_boundary_win32] AT-05(a): 引用符を x_lim=956 個含む n0=7000 の prompt は実行され L=8000 で通る",
+    "[tests/test_runner_agy.py::test_at05_cmdline_boundary_win32] AT-05(a): 引用符 957 個の n0=7000 prompt は CMDLINE_TOO_LONG かつ stub 起動0回",
+    "[tests/test_runner_agy.py::test_at05_cmdline_boundary_win32] AT-05(b): n0=3978 の最悪形は実行され、3979 は拒否される",
+    "[tests/test_runner_agy.py::test_at12_workdir_check] AT-12: agy stub がファイルを作ると workdir_check=='changed'、変更なしなら 'unchanged'",
+    "[tests/test_runner_agy.py::test_at12_workdir_check] AT-12: SNAPSHOT_MAX_FILES+1 個のファイルがあると workdir_check=='skipped'",
+    "[tests/test_runner_agy.py::test_at12_workdir_check] AT-12: cwd 出力 stub の stdout は WORKDIR と一致する",
+    "[tests/test_runner_agy.py::test_at18_newline_cmd_vs_exe] AT-18: agy .cmd stub に 'a<LF>b' を渡すと受信 argv は 'a\\nb'(リテラル2字)、.exe 選択時は argv 構築結果が実改行のまま(置換されない)",
+    "[tests/test_runner_agy.py::test_at24_acd] AT-24(a): .cmd に %CD% を含む prompt を渡すと展開後の値を受信する(not guarded の固定)",
+    "[tests/test_runner_agy.py::test_at24_acd] AT-24(c): agy stub が作ったファイルは残り workdir_check=='changed'",
+    "[tests/test_runner_agy.py::test_at24_acd] AT-24(d): exit1+stderr 'auth expired' は NONZERO_EXIT のみで他の error_code に化けない",
+    "[tests/test_runner_agy.py::test_markers_and_skip_reason] tests の試験関数に pytest.mark.at('AT-05'/'AT-12'/'AT-18'/'AT-24') が付き、Windows 限定試験の skip 理由に 'win32 only' が含まれる",
+    "[tests/test_runner_agy.py::test_agy_argv_layer_all_platforms] (counterpart, 非skip) argv 構築層(cmdline.py)は .cmd では LF→2字\\n 置換後の L を返す(非Windowsでも観測可能)",
+    "[tests/test_runner_agy.py::test_agy_argv_layer_all_platforms] (counterpart, 非skip) argv 構築層(cmdline.py)は .exe では実改行保持の L を返す",
+    "[tests/test_runner_agy.py::test_agy_argv_layer_all_platforms] (counterpart, 非skip) .cmd の実spawn(AT-05/12/18/24)は win32 のみで skipif、skip は sys.platform!='win32' のときだけ(本workspaceは win32)",
+    "[python tests/stubs/stub_run.py agy echo_stdin --prompt-len 7000 --quote-count 7000] 引用符 7000 個の prompt は CMDLINE_TOO_LONG で終了コード1(負例)",
+    "[scripts/check_task_commit.py T019 --green] commit with subject 'T019:' exists and suite green",
+    "[scripts/check_task_commit.py T019 --revert-check] revert point = the commit immediately before T019's own commit; T019 has dependents, so revert them in reverse topological order (highest id first: T027, T026, T025) before reverting T019",
+    "[scripts/check_task_commit.py T019 --green] non-win32: skipped nodes are not green-required; counterpart nodes are"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_runner_agy.py -q",
+     "expect_exit_code": 0,
+     "note": "pytest green"
+    },
+    {
+     "command": "python tests/stubs/stub_run.py agy echo_stdin --prompt-len 7000 --quote-count 7000",
+     "expect_exit_code": 1,
+     "note": "負例: 引用符倍化で L>8000、CMDLINE_TOO_LONG、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_runner_agy.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_runner_agy.py::test_at05_cmdline_boundary_win32\" \"tests/test_runner_agy.py::test_at12_workdir_check\" \"tests/test_runner_agy.py::test_at18_newline_cmd_vs_exe\" \"tests/test_runner_agy.py::test_at24_acd\" \"tests/test_runner_agy.py::test_markers_and_skip_reason\" \"tests/test_runner_agy.py::test_agy_argv_layer_all_platforms\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_runner_agy.py::test_agy_argv_layer_all_platforms\" -q --strict-markers",
+     "expect_exit_code": 0,
+     "note": "非win32でも権威となる counterpart node のみを単独実行"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T019 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T019:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T019 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T020",
+   "title": "deliberate.py(前半): 入力検証・枠予約・R1並列・S1評価と打切り",
+   "intent": "ai_gougi/deliberate.py に async run_deliberate(theme, rounds, run_cli_fn=run_cli) の前半を実装する。入力検証(INVALID_INPUT/THEME_TOO_LONG)、枠予約(need=3 の原子的予約、不可なら BUSY で rounds=[])、R1 並列実行(PARTICIPANT_ORDER 固定)、R1_EVAL で S1<MIN_SUCCESS_R2 なら R2 を実行せず S1=1 は partial+skipped_reason=S1_BELOW_MIN、S1=0 は failed+ALL_FAILED、予約解放。R2 実行と最終 status の ok 判定は次タスク。run_cli は注入式で fake 試験、reserved=True で二重取りを避ける。",
+   "design_refs": [
+    "## 6. 合議ステートマシン",
+    "| deliberate | INVALID_INPUT |",
+    "| deliberate | THEME_TOO_LONG |",
+    "| deliberate | BUSY |",
+    "| deliberate | ALL_FAILED |",
+    "| PARTICIPANT_ORDER | claude, codex, agy |",
+    "| F14 | 同時起動の過多",
+    "| AT-08 | F8,F9",
+    "| AT-09 | F14",
+    "| AT-10 | F4"
+   ],
+   "depends_on": [
+    "T006",
+    "T009",
+    "T011",
+    "T016"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/deliberate.py",
+     "kind": "add",
+     "note": "R1までの run_deliberate。partial: R2 未実装の間 S1>=2 は R1 結果のみを返す暫定挙動(次タスクで置換、テストは暫定挙動に依存しない)"
+    },
+    {
+     "path": "tests/test_deliberate_fake.py",
+     "kind": "add",
+     "note": "fake run_cli で AT-08/09/10。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_deliberate_fake.py::test_s1_below_min_stops] S1=0 は ALL_FAILED(failed)、S1=1 は rounds_executed=1+S1_BELOW_MIN(partial)、結果配列は R1 のみで fake の R2 呼出が0回",
+    "[tests/test_deliberate_fake.py::test_at08_ab] AT-08(a): claude のみ成功で rounds_executed==1, skipped_reason=='S1_BELOW_MIN', status=='partial'",
+    "[tests/test_deliberate_fake.py::test_at08_ab] AT-08(a): 同条件で R2 の fake 呼出は0回",
+    "[tests/test_deliberate_fake.py::test_at08_ab] AT-08(b): 3者失敗で status=='failed', error_code=='ALL_FAILED', rounds に R1 結果が残る",
+    "[tests/test_deliberate_fake.py::test_at10_inputs] AT-10: theme 1500字は受理、1501字は THEME_TOO_LONG(rounds=[])",
+    "[tests/test_deliberate_fake.py::test_at10_inputs] AT-10: rounds=0 と 3 は INVALID_INPUT、rounds=1,2 は受理、省略は DEFAULT_ROUNDS(2)",
+    "[tests/test_deliberate_fake.py::test_at10_inputs] AT-10: 空白のみ theme は INVALID_INPUT",
+    "[tests/test_deliberate_fake.py::test_at09_slots] AT-09: (running,need)=(2,1)/(0,3) は受理、(3,1)/(1,3) は BUSY(rounds=[])、観測同時数 ≤ 3 で、BUSY でも予約は壊れない",
+    "[tests/test_deliberate_fake.py::test_participant_order_fixed] R1 の results は常に claude,codex,agy の順",
+    "[tests/test_deliberate_fake.py::test_slot_released_always] R1 のみで終わる経路・例外発生経路のいずれでも SlotPool の running が 0 に戻る",
+    "[scripts/check_task_commit.py T020 --green] commit with subject 'T020:' exists and suite green",
+    "[scripts/check_task_commit.py T020 --revert-check] revert point = the commit immediately before T020's own commit; T020 has dependents, so revert them in reverse topological order (highest id first: 7 transitive dependents T027..T021) before reverting T020"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_deliberate_fake.py -q -rs --strict-markers",
+     "expect_exit_code": 0,
+     "note": "pytest green (skip は sys.platform!='win32' のみ。本workspaceはwin32)"
+    },
+    {
+     "command": "python -c \"import ai_gougi.deliberate\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"import asyncio,sys;from ai_gougi.deliberate import run_deliberate;r=asyncio.run(run_deliberate('x'*1501,None));sys.exit(0 if r['status']=='ok' else 1)\"",
+     "expect_exit_code": 1,
+     "note": "負例: THEME_TOO_LONG は status!='ok' で終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_deliberate_fake.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_deliberate_fake.py::test_s1_below_min_stops\" \"tests/test_deliberate_fake.py::test_at08_ab\" \"tests/test_deliberate_fake.py::test_at10_inputs\" \"tests/test_deliberate_fake.py::test_at09_slots\" \"tests/test_deliberate_fake.py::test_participant_order_fixed\" \"tests/test_deliberate_fake.py::test_slot_released_always\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T020 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T020:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T020 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T021",
+   "title": "deliberate.py(後半): R2実行・続行規則(F)・status ok/partial 判定",
+   "intent": "run_deliberate の後半を実装する。S1≥MIN_SUCCESS_R2 かつ rounds≥2 のとき R1 成功者だけが R2 に参加し、各自が自分以外の R1 意見を受け取る(prompts.build_r2)、5.2 の status 判定(要求ラウンド全実施かつ全参加者 ok のときのみ ok、それ以外で S1≥1 は partial、failed は全滅)、elapsed_ms、結果の PARTICIPANT_ORDER 固定を実装する。前タスクの暫定挙動を置換する。",
+   "design_refs": [
+    "### 5.2 deliberate の status 判定",
+    "| (F) 続行 |",
+    "| MIN_SUCCESS_R2 | 2 |",
+    "| F8 | 一部参加者の失敗で合議が止まる",
+    "| F9 | 部分失敗を ok と報告する",
+    "| MIN_SUCCESS_R2",
+    "| AT-08 | F8,F9"
+   ],
+   "depends_on": [
+    "T020"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/deliberate.py",
+     "kind": "modify",
+     "note": "R2と最終status。partial: 前タスクの暫定『R1のみ返す』を置換、R1 経路は不変"
+    },
+    {
+     "path": "tests/test_deliberate_r2.py",
+     "kind": "add",
+     "note": "fake run_cli で R2/status。partial: 追加のみ、中断時は commit revert で前タスク状態に戻る"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_deliberate_r2.py::test_s1_table_r2_counts] S1=2,3 のとき R2 は各1意見(S1-1)/各2意見を受け取り、S1=1 は R2 なし(partial)、S1=0 は failed",
+    "[tests/test_deliberate_r2.py::test_status_ok_only_when_all_rounds_all_ok] status=='ok' は要求ラウンド全実施かつ全参加者 ok のときのみ、それ以外で S1≥1 は partial、全滅は failed",
+    "[tests/test_deliberate_r2.py::test_r2_only_successful_participants] R1 失敗者は R2 に呼ばれず(fake 呼出記録)、R2 プロンプトには自分以外の成功者の意見だけが入る",
+    "[tests/test_deliberate_r2.py::test_result_order_claude_codex_agy] rounds=1 指定では R2 を実行せず、結果は常に claude,codex,agy の順",
+    "[tests/test_deliberate_r2.py::test_slot_released_after_r2] R2 完走・R2 途中例外のいずれでも SlotPool の running が 0 に戻る",
+    "[tests/test_deliberate_r2.py::test_s1_table_r2_counts] run_cli_fn が全て失敗する fake のとき status!='ok' で rounds_executed==1(R2 に進まない)",
+    "[scripts/check_task_commit.py T021 --green] commit with subject 'T021:' exists and suite green",
+    "[scripts/check_task_commit.py T021 --revert-check] revert point = the commit immediately before T021's own commit; T021 has dependents, so revert them in reverse topological order (highest id first: T027, T026, T025, T023, T022) before reverting T021"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_deliberate_r2.py -q -rs --strict-markers",
+     "expect_exit_code": 0,
+     "note": "pytest green (skip は sys.platform!='win32' のみ。本workspaceはwin32)"
+    },
+    {
+     "command": "python -c \"import ai_gougi.deliberate\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -c \"import asyncio,sys;from ai_gougi.deliberate import run_deliberate;from ai_gougi.schema import make_prelaunch_error as m;r=asyncio.run(run_deliberate('x',2,run_cli_fn=lambda p,t,**k:asyncio.sleep(0,m(p,'CLI_NOT_FOUND','x'))));sys.exit(0 if r['status']=='ok' else 1)\"",
+     "expect_exit_code": 1,
+     "note": "負例: 全員失敗の fake では status=failed、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_deliberate_r2.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_deliberate_r2.py::test_s1_table_r2_counts\" \"tests/test_deliberate_r2.py::test_status_ok_only_when_all_rounds_all_ok\" \"tests/test_deliberate_r2.py::test_r2_only_successful_participants\" \"tests/test_deliberate_r2.py::test_result_order_claude_codex_agy\" \"tests/test_deliberate_r2.py::test_slot_released_after_r2\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T021 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T021:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T021 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T022",
+   "title": "deliberate統合試験A: 実stub 3者での機能面(AT-01/07/13/24b)",
+   "intent": "実 run_cli と stub CLI 3者で run_deliberate を受入試験する(tests/test_deliberate_stub.py のみ追加)。AT-01、AT-07、AT-13、AT-24(b)。タイミング系は次タスク。 tests/stubs/stub_run.py に `--deliberate MODE` を追加する(3者とも同じ MODE の stub で run_deliberate を1回実行し、status=='ok' のときだけ終了コード0)。",
+   "design_refs": [
+    "| AT-01 | F9",
+    "| AT-07 | F8,F9",
+    "| AT-13 | F1,F8",
+    "| AT-24 | F21,F22,F23,F27"
+   ],
+   "depends_on": [
+    "T008",
+    "T017",
+    "T021"
+   ],
+   "changes": [
+    {
+     "path": "tests/test_deliberate_stub.py",
+     "kind": "add",
+     "note": "AT-01/07/13/24b。partial: テストのみ追加"
+    },
+    {
+     "path": "tests/stubs/stub_run.py",
+     "kind": "modify",
+     "note": "--deliberate MODE を追加(3 stub で run_deliberate を実行し status==ok なら0)"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_deliberate_stub.py::test_at01_all_ok] AT-01: 全stub成功で status=='ok', rounds_executed==2, 各ラウンド results が3件",
+    "[tests/test_deliberate_stub.py::test_at07_codex_exit1_partial] AT-07: codex が exit1 なら codex=NONZERO_EXIT、R2 は claude/agy の2者で各1意見のみ受信、status=='partial'",
+    "[tests/test_deliberate_stub.py::test_at13_codex_not_found] AT-13: BIN_codex を存在しないパスにすると codex=CLI_NOT_FOUND、他2者続行、status=='partial'",
+    "[tests/test_deliberate_stub.py::test_at24b_injection_passthrough] AT-24(b): R1 意見の指示文が R2 の <opinion> 内にそのまま渡る",
+    "[python tests/stubs/stub_run.py --deliberate exit1] 3者とも exit1 の stub では status=failed で終了コード1(負例)",
+    "[scripts/check_task_commit.py T022 --green] commit with subject 'T022:' exists and suite green",
+    "[scripts/check_task_commit.py T022 --revert-check] revert point = the commit immediately before T022's own commit; T022 has dependents, so revert them in reverse topological order (highest id first: T027, T026, T025) before reverting T022"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_deliberate_stub.py -q -rs --strict-markers",
+     "expect_exit_code": 0,
+     "note": "pytest green (skip は sys.platform!='win32' のみ。本workspaceはwin32)"
+    },
+    {
+     "command": "python tests/stubs/stub_run.py --deliberate echo_stdin",
+     "expect_exit_code": 0,
+     "note": "全員成功の deliberate は status=ok で終了コード0"
+    },
+    {
+     "command": "python tests/stubs/stub_run.py --deliberate exit1",
+     "expect_exit_code": 1,
+     "note": "負例: 全員失敗は終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_deliberate_stub.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_deliberate_stub.py::test_at01_all_ok\" \"tests/test_deliberate_stub.py::test_at07_codex_exit1_partial\" \"tests/test_deliberate_stub.py::test_at13_codex_not_found\" \"tests/test_deliberate_stub.py::test_at24b_injection_passthrough\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T022 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T022:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T022 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T023",
+   "title": "deliberate統合試験B: 時間面(AT-16a/AT-17)",
+   "intent": "stub CLI 3者でタイミングと長さの限界を受入試験する(tests/test_deliberate_timing.py のみ追加)。AT-16(a) 実測の R2 受信長、AT-17(TIMEOUT_SEC=3, KILL_WAIT_SEC=2 の T_max(r) 上限)。",
+   "design_refs": [
+    "| AT-16 | F19",
+    "| AT-17 | F2,F8",
+    "| (A) T_max(r) |"
+   ],
+   "depends_on": [
+    "T008",
+    "T017",
+    "T021"
+   ],
+   "changes": [
+    {
+     "path": "tests/test_deliberate_timing.py",
+     "kind": "add",
+     "note": "AT-16a/17。partial: テストのみ追加"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_deliberate_timing.py::test_at16a_r2_prompt_len_le_w2] AT-16(a): 各上限(theme 1500字, 意見2000字×2)で実測の R2 プロンプト受信長が W2(6000)以下かつ PROMPT_MAX_CHARS(7000) 以内",
+    "[tests/test_deliberate_timing.py::test_at17a_all_hang_failed_within_tmax1] AT-17(a): TIMEOUT_SEC=3, KILL_WAIT_SEC=2 で全stubハング→failed, elapsed_ms ≤ 5000(T_max(1))",
+    "[tests/test_deliberate_timing.py::test_at17b_r2_hang_partial_within_tmax2] AT-17(b): R1成功/R2ハング→partial, elapsed_ms ≤ 10000(T_max(2))",
+    "[python tests/stubs/stub_run.py --deliberate sleep --timeout 1 --kill-wait 1] 全員ハングは T_max(1) 以内に status=failed で終了コード1(負例)",
+    "[scripts/check_task_commit.py T023 --green] commit with subject 'T023:' exists and suite green",
+    "[scripts/check_task_commit.py T023 --revert-check] revert point = the commit immediately before T023's own commit; T023 has dependents, so revert them in reverse topological order (highest id first: T027, T026, T025) before reverting T023"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_deliberate_timing.py -q -rs --strict-markers",
+     "expect_exit_code": 0,
+     "note": "pytest green (skip は sys.platform!='win32' のみ。本workspaceはwin32)"
+    },
+    {
+     "command": "python tests/stubs/stub_run.py --deliberate sleep --timeout 1 --kill-wait 1",
+     "expect_exit_code": 1,
+     "note": "負例: 全員 TIMEOUT、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_deliberate_timing.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_deliberate_timing.py::test_at16a_r2_prompt_len_le_w2\" \"tests/test_deliberate_timing.py::test_at17a_all_hang_failed_within_tmax1\" \"tests/test_deliberate_timing.py::test_at17b_r2_hang_partial_within_tmax2\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T023 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T023:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T023 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T024",
+   "title": "server.py/__main__: 実run_cli配線とエントリポイント",
+   "intent": "ai_gougi/server.py に build_server(run_cli, run_deliberate) を実配線した mcp オブジェクトと main()(--check-config 指定時は check_template と log_startup_env だけ実行して exit 0/1、それ以外は stdio 起動、起動時に check_template と log_startup_env と codex 用 git 管理外ログ)を実装し、ai_gougi/__main__.py で `python -m ai_gougi` を可能にする。パッケージング/配布はスコープ外なのでエントリは python -m のみ。",
+   "design_refs": [
+    "## 2. アーキテクチャ",
+    "`run_cli`: 検証→枠予約→snapshot→起動→待機/kill→切り詰め→結果生成。",
+    "`run_deliberate` は 6 節の実装。"
+   ],
+   "depends_on": [
+    "T007",
+    "T010",
+    "T016",
+    "T020"
+   ],
+   "changes": [
+    {
+     "path": "ai_gougi/server.py",
+     "kind": "add",
+     "note": "実配線とmain/--check-config。partial: 新規追加のみ"
+    },
+    {
+     "path": "ai_gougi/__main__.py",
+     "kind": "add",
+     "note": "python -m ai_gougi。partial: 新規追加のみ"
+    },
+    {
+     "path": "tests/test_server_wiring.py",
+     "kind": "add",
+     "note": "配線と起動検査。partial: テストのみ追加"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_server_wiring.py::test_import_and_tools_list] `python -c \"import ai_gougi.server\"` が終了コード0で、mcp の tools 一覧に ask_claude/ask_codex/ask_agy/deliberate がある",
+    "[tests/test_server_wiring.py::test_template_overlimit_exits_1] AT-16(b): 定型文超過設定(AI_GOUGI_TEMPLATE_MAX_CHARS=1)で `python -m ai_gougi --check-config` が終了コード1で即終了する",
+    "[tests/test_server_wiring.py::test_template_overlimit_exits_1] AT-16(b): 既定では `python -m ai_gougi --check-config` が終了コード0",
+    "[tests/test_server_wiring.py::test_ask_claude_calls_real_run_cli] ask_claude を stub 注入せず実 run_cli 経由で呼ぶと run_cli('claude', prompt) が1回呼ばれる(monkeypatch で確認)",
+    "[tests/test_server_wiring.py::test_startup_log_stderr_only] 起動ログが stdout に1バイトも書かれず stderr のみに出る",
+    "[scripts/check_task_commit.py T024 --green] commit with subject 'T024:' exists and suite green",
+    "[scripts/check_task_commit.py T024 --revert-check] revert point = the commit immediately before T024's own commit; T024 has dependents, so revert them in reverse topological order (highest id first: T027, T026, T025) before reverting T024"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_server_wiring.py -q -rs --strict-markers",
+     "expect_exit_code": 0,
+     "note": "pytest green (skip は sys.platform!='win32' のみ。本workspaceはwin32)"
+    },
+    {
+     "command": "python -c \"import ai_gougi.server\"",
+     "expect_exit_code": 0,
+     "note": "importable"
+    },
+    {
+     "command": "python -m ai_gougi --check-config",
+     "expect_exit_code": 0,
+     "note": "既定設定で起動検査が通る"
+    },
+    {
+     "command": "python -c \"import os,subprocess,sys;e=dict(os.environ,AI_GOUGI_TEMPLATE_MAX_CHARS='1');sys.exit(subprocess.call([sys.executable,'-m','ai_gougi','--check-config'],env=e))\"",
+     "expect_exit_code": 1,
+     "note": "AT-16b 負例: TEMPLATE_MAX_CHARS 超過で起動検査が exit 1"
+    },
+    {
+     "command": "python -m pytest tests/test_server_wiring.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_server_wiring.py::test_import_and_tools_list\" \"tests/test_server_wiring.py::test_template_overlimit_exits_1\" \"tests/test_server_wiring.py::test_ask_claude_calls_real_run_cli\" \"tests/test_server_wiring.py::test_startup_log_stderr_only\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T024 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T024:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T024 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T025",
+   "title": "MCP stdio E2E-A: AT-19 error_code と isError/スキーマ適合",
+   "intent": "mcp クライアントの stdio_client で `python -m ai_gougi` を stub BIN_* 付きで起動し、MCP 層経由で AT-19(各 error_code の isError とスキーマ適合、起動前エラーの固定値)を検証する。tests/test_e2e_errors.py のみ追加。 tests/smoke_mcp.py(T013)に `--stdio`(python -m ai_gougi を stdio_client で起動)と `--tool ask_claude|ask_codex|ask_agy` を追加する。",
+   "design_refs": [
+    "| AT-19 |"
+   ],
+   "depends_on": [
+    "T013",
+    "T018",
+    "T019",
+    "T022",
+    "T023",
+    "T024"
+   ],
+   "changes": [
+    {
+     "path": "tests/test_e2e_errors.py",
+     "kind": "add",
+     "note": "stdio E2E AT-19。partial: テストのみ追加"
+    },
+    {
+     "path": "tests/smoke_mcp.py",
+     "kind": "modify",
+     "note": "--stdio と --tool を追加"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_e2e_errors.py::test_ask_error_codes_iserror_and_schema] AT-19: ask_* の ok=false(INVALID_INPUT/PROMPT_TOO_LONG/CLI_NOT_FOUND/NONZERO_EXIT/EMPTY_OUTPUT/TIMEOUT/BUSY)で isError==True",
+    "[tests/test_e2e_errors.py::test_ask_error_codes_iserror_and_schema] AT-19: ask_* の ok=true で isError==False",
+    "[tests/test_e2e_errors.py::test_ask_error_codes_iserror_and_schema] AT-19: 全 structuredContent が 5.1 スキーマに適合する",
+    "[tests/test_e2e_errors.py::test_deliberate_status_iserror] AT-19: deliberate は status ok/partial で isError==False、failed のみ True",
+    "[tests/test_e2e_errors.py::test_prelaunch_fixed_values] AT-19: 起動前エラーは固定値(stdout=='', stdout_total_chars==0, workdir_check=='skipped')",
+    "[python tests/smoke_mcp.py --stdio --tool ask_codex --missing-bin] stdio 経由で BIN_codex 未解決は isError により終了コード1(負例)",
+    "[scripts/check_task_commit.py T025 --green] commit with subject 'T025:' exists and suite green",
+    "[scripts/check_task_commit.py T025 --revert-check] revert point = the commit immediately before T025's own commit; T025 has dependents, so revert them in reverse topological order (highest id first: T027, T026) before reverting T025"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_e2e_errors.py -q -rs --strict-markers",
+     "expect_exit_code": 0,
+     "note": "pytest green (skip は sys.platform!='win32' のみ。本workspaceはwin32)"
+    },
+    {
+     "command": "python tests/smoke_mcp.py --stdio",
+     "expect_exit_code": 0,
+     "note": "stdio 経由の ask_claude 成功は終了コード0"
+    },
+    {
+     "command": "python tests/smoke_mcp.py --stdio --tool ask_codex --missing-bin",
+     "expect_exit_code": 1,
+     "note": "負例: CLI_NOT_FOUND は isError、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_e2e_errors.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_e2e_errors.py::test_ask_error_codes_iserror_and_schema\" \"tests/test_e2e_errors.py::test_deliberate_status_iserror\" \"tests/test_e2e_errors.py::test_prelaunch_fixed_values\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T025 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T025:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T025 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T026",
+   "title": "MCP stdio E2E-B: AT-01/AT-02/AT-10 のMCP経由ハッピーパス",
+   "intent": "同じ stdio E2E 方式で AT-01(deliberate 全成功)、AT-02(ask_claude 成功と空出力)、AT-10(rounds 省略と範囲外)を MCP 層経由で検証する。tests/test_e2e_mcp.py のみ追加。 tests/smoke_mcp.py に `--tool deliberate --rounds N` を追加する。",
+   "design_refs": [
+    "| AT-01 |",
+    "| AT-02 |",
+    "| AT-10 |"
+   ],
+   "depends_on": [
+    "T025"
+   ],
+   "changes": [
+    {
+     "path": "tests/test_e2e_mcp.py",
+     "kind": "add",
+     "note": "stdio E2E AT-01/02/10。partial: テストのみ追加"
+    },
+    {
+     "path": "tests/smoke_mcp.py",
+     "kind": "modify",
+     "note": "--tool deliberate / --rounds を追加"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_e2e_mcp.py::test_at02_ask_claude_ok_and_empty] AT-02: ask_claude 'hello' 成功は isError==False/stdout=='hello'、空白のみ出力は isError==True/EMPTY_OUTPUT",
+    "[tests/test_e2e_mcp.py::test_at10_rounds_default_and_out_of_range] AT-10: deliberate を rounds 省略で呼ぶと rounds_requested==2、rounds=3 は INVALID_INPUT",
+    "[tests/test_e2e_mcp.py::test_at01_all_ok_via_mcp] AT-01: 全stub成功の deliberate が status=='ok', rounds_executed==2 を MCP 経由で返す",
+    "[python tests/smoke_mcp.py --stdio --tool deliberate --rounds 0] rounds=0 は INVALID_INPUT(status=failed)で isError により終了コード1(負例)",
+    "[scripts/check_task_commit.py T026 --green] commit with subject 'T026:' exists and suite green",
+    "[scripts/check_task_commit.py T026 --revert-check] revert point = the commit immediately before T026's own commit; T026 has dependents, so revert them in reverse topological order (highest id first: T027) before reverting T026"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_e2e_mcp.py -q -rs --strict-markers",
+     "expect_exit_code": 0,
+     "note": "pytest green (skip は sys.platform!='win32' のみ。本workspaceはwin32)"
+    },
+    {
+     "command": "python tests/smoke_mcp.py --stdio --tool deliberate --rounds 0",
+     "expect_exit_code": 1,
+     "note": "負例: rounds 範囲外、終了コード1"
+    },
+    {
+     "command": "python -m pytest tests/test_e2e_mcp.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_e2e_mcp.py::test_at02_ask_claude_ok_and_empty\" \"tests/test_e2e_mcp.py::test_at10_rounds_default_and_out_of_range\" \"tests/test_e2e_mcp.py::test_at01_all_ok_via_mcp\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T026 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T026:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T026 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  },
+  {
+   "id": "T027",
+   "title": "受入網羅マップ(設計9節)と全スイート最終統合",
+   "intent": "設計9節『stub を BIN_* で差し替える』の AT 表と7節の F 表の網羅を自動検査する。tests/coverage_map.py に NOT_GUARDED(F21〜F28 → 設計書の 'not guarded' 文言)と check(drop=None)->問題数を持たせ、tests/test_coverage_map.py が docs/design-ai-gougi.md をパースして (1) `| AT-nn |` 行の全 ID(24件)が tests/*.py の pytest.mark.at を付けた試験にマップされること、(2) `| Fn |` 行の全 ID(F1..F28、28件)が AT 表の F 列経由の試験マップか NOT_GUARDED に含まれること、(3) NOT_GUARDED の各 F は設計書の該当行に '**not guarded**' が実在することを assert する。check(drop='AT-07') のように 1 件落とすと問題数>0 になる負例も試験する。最後に全スイートを実行する。スコープ外(パッケージング/配布、CI、運用手順書、認証管理、ラウンド3自動化、他のラウンド制御ツール、永続化)は実装しない。",
+   "design_refs": [
+    "## 7. 失敗モードと対策の対応表（1モード＝主機構1つ）",
+    "スコープ外: パッケージング/配布、CI、運用手順書、認証管理、ラウンド3の自動化",
+    "| F21 | agy `.cmd` で `%VAR%` が cmd.exe に展開される",
+    "| F22 | 他者意見内の指示文によるインジェクション",
+    "| F23 | agy 書込の予防／plan mode の抜け穴",
+    "| F24 | クライアントのMCPタイムアウトが T_max(2) より短い",
+    "| F25 | サーバー異常終了での途中結果消失",
+    "| F26 | 巨大出力のメモリ内バッファ",
+    "| F27 | CLIの認証切れ",
+    "| F28 | kill後も回収できないプロセス",
+    "| AT-24 | F21,F22,F23,F27"
+   ],
+   "depends_on": [
+    "T002",
+    "T026"
+   ],
+   "changes": [
+    {
+     "path": "tests/coverage_map.py",
+     "kind": "add",
+     "note": "NOT_GUARDED と check()。partial: テスト補助のみ"
+    },
+    {
+     "path": "tests/test_coverage_map.py",
+     "kind": "add",
+     "note": "設計書パースによる網羅検査。partial: テストのみ追加"
+    }
+   ],
+   "acceptance": [
+    "[tests/test_coverage_map.py::test_every_at_in_design_has_marked_test] 設計書の `| AT-nn |` 行から得た AT-01..AT-24 の24件全てが pytest.mark.at の付いた試験に対応し欠番0件",
+    "[tests/test_coverage_map.py::test_every_f_mapped_or_not_guarded] 設計書の `| Fn |` 行から得た F1..F28 の28件全てが AT 表 F 列経由の試験マップか NOT_GUARDED のいずれかにある(両方空の F が0件)",
+    "[tests/test_coverage_map.py::test_not_guarded_text_matches_design] NOT_GUARDED の各 F について設計書の該当行に '**not guarded**' がある",
+    "[tests/test_coverage_map.py::test_not_guarded_text_matches_design] F21〜F28 以外が NOT_GUARDED に入っていない",
+    "[tests/test_coverage_map.py::test_not_guarded_text_matches_design] F24/F25/F26/F28 には『試験対象外』の理由文字列がある",
+    "[tests/test_coverage_map.py::test_checker_detects_missing_at] check(drop='AT-07') は問題数1以上を返し、check() は 0 を返す(検査器自身の負例)",
+    "[tests/test_coverage_map.py::test_scope_out_artifacts_absent] リポジトリに pyproject/CI 設定/永続化コードを追加していない(.github と setup.py と pyproject.toml の不在を assert)",
+    "[scripts/check_task_commit.py T027 --green] commit with subject 'T027:' exists and suite green",
+    "[scripts/check_task_commit.py T027 --revert-check] revert point = the commit immediately before T027's own commit; T027 is a leaf, so `git revert` of its commit leaves the suite green"
+   ],
+   "verify": [
+    {
+     "command": "python -m pytest tests/test_coverage_map.py -q -rs --strict-markers",
+     "expect_exit_code": 0,
+     "note": "pytest green (skip は sys.platform!='win32' のみ。本workspaceはwin32)"
+    },
+    {
+     "command": "python -c \"import sys;from tests.coverage_map import check;sys.exit(1 if check() else 0)\"",
+     "expect_exit_code": 0,
+     "note": "網羅OKで exit 0"
+    },
+    {
+     "command": "python -c \"import sys;from tests.coverage_map import check;sys.exit(1 if check(drop='AT-07') else 0)\"",
+     "expect_exit_code": 1,
+     "note": "負例: AT-07 を落とすと網羅検査が失敗(exit 1)"
+    },
+    {
+     "command": "python -m pytest tests/test_coverage_map.py --collect-only -q",
+     "expect_exit_code": 0,
+     "note": "テストファイルが収集可能(import/構文エラー無し)"
+    },
+    {
+     "command": "python -m pytest \"tests/test_coverage_map.py::test_every_at_in_design_has_marked_test\" \"tests/test_coverage_map.py::test_every_f_mapped_or_not_guarded\" \"tests/test_coverage_map.py::test_not_guarded_text_matches_design\" \"tests/test_coverage_map.py::test_checker_detects_missing_at\" \"tests/test_coverage_map.py::test_scope_out_artifacts_absent\" -q",
+     "expect_exit_code": 0,
+     "note": "acceptance 引用の node id を明示指定(欠落すると pytest exit 4 で存在を証明)"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T027 --green",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: subject 'T027:' のコミットが存在し全スイート green"
+    },
+    {
+     "command": "python scripts/check_task_commit.py T027 --revert-check",
+     "expect_exit_code": 0,
+     "note": "自コミット後に実行: revert point(直前コミット)と自コミットの revert 後も全スイート green"
+    }
+   ],
+   "estimate_rounds": 2
+  }
+ ]
+}

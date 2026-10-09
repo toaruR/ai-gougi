@@ -4,8 +4,10 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
+import time
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
@@ -92,6 +94,62 @@ def prelaunch(
     return LaunchPlan(participant, argv, stdin_text, devnull, held, c)
 
 
+async def _feed_stdin(proc, data: Optional[bytes]) -> None:
+    if proc.stdin is None or data is None:
+        return
+    try:
+        proc.stdin.write(data)
+        await proc.stdin.drain()
+        proc.stdin.close()  # EOF
+    except OSError:
+        pass
+
+
+async def _execute(plan: LaunchPlan) -> AskResult:
+    """実行段A: 起動・stdin/EOF/DEVNULL・ok 判定。タイムアウト/切詰め/snapshot は後続タスク。"""
+    c = plan.cfg
+    p = plan.participant
+    t0 = time.monotonic()
+
+    def ms() -> int:
+        return int((time.monotonic() - t0) * 1000)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *plan.argv,
+            cwd=c.WORKDIR,
+            stdin=asyncio.subprocess.DEVNULL if plan.stdin_devnull else asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (OSError, ValueError) as e:
+        return make_ask_result(
+            p, ok=False, exit_code=None, duration_ms=ms(), workdir_check="skipped",
+            error_code="SPAWN_FAILED", error_message=f"{type(e).__name__}: {e}",
+        )
+
+    data = plan.stdin_text.encode(c.ENCODING) if plan.stdin_text is not None else None
+    feeder = asyncio.ensure_future(_feed_stdin(proc, data))
+    out_b, err_b = await asyncio.gather(proc.stdout.read(), proc.stderr.read())
+    await proc.wait()
+    await feeder
+
+    stdout = out_b.decode(c.ENCODING, errors="replace")
+    stderr = err_b.decode(c.ENCODING, errors="replace")
+    code = proc.returncode
+    ok = code == 0 and bool(stdout.strip())
+    error_code = error_message = None
+    if code != 0:
+        error_code, error_message = "NONZERO_EXIT", f"exit code {code}"
+    elif not ok:
+        error_code, error_message = "EMPTY_OUTPUT", "stdout is empty"
+    return make_ask_result(
+        p, ok=ok, exit_code=code, stdout=stdout, stderr=stderr,
+        duration_ms=ms(), workdir_check="skipped",
+        error_code=error_code, error_message=error_message,
+    )
+
+
 async def run_cli(
     participant: str,
     prompt: str,
@@ -99,10 +157,14 @@ async def run_cli(
     pool: SlotPool | None = None,
     reserved: bool = False,
 ) -> AskResult:
-    """起動前段のみ(実行段は後続タスク)。成功時は枠を解放して NotImplementedError。"""
+    """起動前段 + 実行段A。枠は全経路で解放する。"""
     plan = prelaunch(participant, prompt, pool=pool, reserved=reserved)
     if not isinstance(plan, LaunchPlan):
         return plan
-    if plan.slot_held:
-        (pool if pool is not None else POOL).release(1)
-    raise NotImplementedError("execution stage is not implemented yet")
+    try:
+        return await _execute(plan)
+    finally:
+        if plan.slot_held:
+            (pool if pool is not None else POOL).release(1)
+
+

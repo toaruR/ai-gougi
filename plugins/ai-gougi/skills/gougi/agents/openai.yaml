@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI-Gougi 合議"
+  short_description: "AI-Gougiで独立意見と反論を集め、共通点・対立点・推奨案を整理"
+  default_prompt: "$gougi この設計の妥当性と改善点を合議して"

@@ -3,7 +3,7 @@
 English | [日本語](README.ja.md)
 
 An MCP server that lets **Claude Code, Codex CLI, and Antigravity CLI (`agy`) deliberate on the same topic**.
-Each CLI only offers single-shot headless execution, so AI-Gougi ("gougi" = council deliberation) wraps them as subprocesses and exposes them as MCP tools. The calling Claude Code session acts as the moderator; the server itself never moderates.
+Each CLI only offers single-shot headless execution, so AI-Gougi ("gougi" = council deliberation) wraps them as subprocesses and exposes them as MCP tools. The calling client, such as Claude Code or Codex, acts as the moderator; the server itself never moderates.
 
 - Windows native (`.cmd` shims, `taskkill /T /F` process-tree kill)
 - All participants run **read-only** (claude: plan mode, codex: `--sandbox read-only`)
@@ -38,12 +38,7 @@ pip install mcp jsonschema
 
 ## Usage
 
-```
-python -m ai_gougi                 # start as an MCP server (stdio)
-python -m ai_gougi --check-config  # validate config, print startup log to stderr, exit 0
-```
-
-stdout is reserved for MCP; all logs go to stderr (`[ai_gougi] <kind>: ...`).
+After the MCP server is registered, your client starts it automatically when connecting. Follow the client registration and wrapper skill installation steps below.
 
 ### Registering with Claude Code
 
@@ -56,6 +51,7 @@ Example `.mcp.json` in the project to be discussed. `WORKDIR` defaults to the se
       "type": "stdio",
       "command": "python",
       "args": ["-m", "ai_gougi"],
+      "timeout": 1300000,
       "env": {
         "PYTHONPATH": "D:/path/to/ai-gougi",
         "AI_GOUGI_WORKDIR": "D:/path/to/your/project"
@@ -64,6 +60,73 @@ Example `.mcp.json` in the project to be discussed. `WORKDIR` defaults to the se
   }
 }
 ```
+
+### Registering with Codex
+
+Add the following to `~/.codex/config.toml` (`$CODEX_HOME/config.toml` if `CODEX_HOME` is set). Replace the example path with your AI-Gougi checkout, and use a Python executable with the required packages installed.
+
+```toml
+[mcp_servers.ai-gougi]
+command = "python"
+args = ["-m", "ai_gougi"]
+tool_timeout_sec = 1300
+
+[mcp_servers.ai-gougi.env]
+PYTHONPATH = "/path/to/ai-gougi"
+PYTHONUTF8 = "1"
+```
+
+### Installing the `gougi` wrapper skill
+
+The wrapper calls `deliberate` and asks the calling client to summarize the results. First register the AI-Gougi MCP server with your client; copying the skill does not register the server. Allow at least 1300 seconds per tool call for the default two rounds.
+
+Run this PowerShell snippet from the repository root to install the skill globally for both Claude Code and Codex:
+
+```powershell
+$gougiSource = Join-Path (Get-Location).Path 'plugins\ai-gougi\skills\gougi'
+$gougiClaudeSkills = Join-Path $env:USERPROFILE '.claude\skills'
+$gougiCodexSkills = if ($env:CODEX_HOME) {
+    Join-Path $env:CODEX_HOME 'skills'
+} else {
+    Join-Path $env:USERPROFILE '.codex\skills'
+}
+New-Item -ItemType Directory -Force -Path $gougiClaudeSkills, $gougiCodexSkills | Out-Null
+Copy-Item -LiteralPath $gougiSource -Destination $gougiClaudeSkills -Recurse -Force
+Copy-Item -LiteralPath $gougiSource -Destination $gougiCodexSkills -Recurse -Force
+```
+
+This creates `~/.claude/skills/gougi/` and `~/.codex/skills/gougi/` (or `$CODEX_HOME/skills/gougi/`). To install for just one client, run only its copy command. Open a new session after installing; in Claude Code, use `/mcp` to check that AI-Gougi is connected.
+
+The [wrapper package](plugins/ai-gougi/README.md) follows Agent Plugins Specification 1.0.0. Compatible clients can register `plugins/ai-gougi/` as the plugin root and discover `gougi` under `skills/`; invocation names depend on the client.
+
+### Using the wrapper
+
+| Client | Input |
+|---|---|
+| Claude Code | `/gougi Review this design and suggest improvements` |
+| Codex | `$gougi Review this design and suggest improvements` |
+
+By default, the wrapper runs independent opinions (R1) and rebuttal/reconsideration (R2), then the caller summarizes common ground, disagreements, and a recommendation. It reports participant failures and skipped rounds.
+
+To request independent opinions only:
+
+```text
+/gougi Give independent opinions only on whether to migrate these three modules incrementally
+```
+
+Use `$gougi` instead in Codex. Provide the target file or relevant background when the topic depends on context; participant CLIs do not receive the caller's conversation history. If the MCP tool is unavailable, the skill reports the missing connection rather than producing a deliberation result.
+
+### Output locations
+
+| Artifact | Output location |
+|---|---|
+| Intermediate results: R1 independent opinions | The MCP response: `structuredContent.rounds[0].results[].stdout` |
+| Intermediate results: R2 rebuttals and reconsideration | The MCP response: `structuredContent.rounds[1].results[].stdout`, when R2 runs |
+| Participant errors and execution details | Each result's `stderr`, `error_code`, and other fields in `structuredContent.rounds[].results[]` |
+| Final result: the moderator's common ground, disagreements, and recommendation | The calling client's chat response |
+| Server diagnostic logs | The server's stderr, handled by the MCP client |
+
+The same result JSON is also returned in MCP `content`. Round results are collected in memory and returned when the tool call completes; AI-Gougi does not stream or save them to intermediate files. The server and wrapper have no fixed output directory or automatic file persistence for the final result. To retain files, ask the calling client to save the results to a specified path separately. `WORKDIR` identifies the participant CLIs' working directory and the directory checked for changes.
 
 ## MCP tools
 

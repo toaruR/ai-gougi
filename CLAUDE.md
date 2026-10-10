@@ -58,4 +58,7 @@ The following protocol applies **ONLY during `strict-goal` workflows** (e.g., re
 -->
 
 - （ここに知見を追記していく）
+- pytest は `rtk proxy python -m pytest ...` で実行する。rtk フック経由だと出力が壊れる。
+- `import tests.*` が site-packages の別 `tests` パッケージに隠される。`tests/__init__.py` 必須。
+- 日本語コミット件名の `git log` を Python(cp932)で読むと UnicodeDecodeError。`git config --local i18n.logOutputEncoding cp932` で回避（PYTHONUTF8=1 は tasklist デコードを壊すので不可）。
 <!-- knowledge-kit:end section=gotchas -->

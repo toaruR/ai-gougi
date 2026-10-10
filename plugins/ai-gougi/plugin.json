@@ -1,0 +1,7 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "ai-gougi",
+  "version": "1.0.0",
+  "description": "AI-Gougi MCPを呼び出して複数AIの独立意見・反論・再検討を整理するgougiスキル。",
+  "keywords": ["agent-skills", "ai-gougi", "deliberation", "mcp"]
+}

@@ -3,7 +3,7 @@
 [English](README.md) | 日本語
 
 **Claude Code / Codex CLI / Antigravity CLI(`agy`) に同一テーマを諮り合議させる** MCP サーバーです。
-各 CLI は単体のヘッドレス実行しか持たないため、AI-Gougi が各 CLI を subprocess でラップして MCP ツールとして公開します。司会は呼び出し側の Claude Code が担い、サーバー自身は司会をしません。
+各 CLI は単体のヘッドレス実行しか持たないため、AI-Gougi が各 CLI を subprocess でラップして MCP ツールとして公開します。司会は呼び出し側の Claude Code や Codex が担い、サーバー自身は司会をしません。
 
 - Windows ネイティブ(`.cmd` shim 対応、`taskkill /T /F` でプロセスツリーを kill)
 - 参加者はすべて**読み取り専用**で起動(claude: plan モード、codex: `--sandbox read-only`)
@@ -38,12 +38,7 @@ pip install mcp jsonschema
 
 ## 使い方
 
-```
-python -m ai_gougi                 # MCP サーバー(stdio)として起動
-python -m ai_gougi --check-config  # 設定を検査し、起動ログを stderr に出して終了コード 0 で終了
-```
-
-stdout は MCP 通信専用で、ログはすべて stderr(`[ai_gougi] <kind>: ...`)に出ます。
+MCPを登録すると、接続時にクライアントがサーバーを自動起動します。以下のクライアント登録とラッパースキルの導入を行ってください。
 
 ### Claude Code への登録
 
@@ -56,6 +51,7 @@ stdout は MCP 通信専用で、ログはすべて stderr(`[ai_gougi] <kind>: .
       "type": "stdio",
       "command": "python",
       "args": ["-m", "ai_gougi"],
+      "timeout": 1300000,
       "env": {
         "PYTHONPATH": "D:/path/to/ai-gougi",
         "AI_GOUGI_WORKDIR": "D:/path/to/your/project"
@@ -64,6 +60,73 @@ stdout は MCP 通信専用で、ログはすべて stderr(`[ai_gougi] <kind>: .
   }
 }
 ```
+
+### Codexへの登録
+
+以下を `~/.codex/config.toml` に追加します（`CODEX_HOME` を設定している場合は `$CODEX_HOME/config.toml`）。パスはAI-Gougiを配置した場所に置き換え、必要なパッケージが入ったPythonを指定してください。
+
+```toml
+[mcp_servers.ai-gougi]
+command = "python"
+args = ["-m", "ai_gougi"]
+tool_timeout_sec = 1300
+
+[mcp_servers.ai-gougi.env]
+PYTHONPATH = "/path/to/ai-gougi"
+PYTHONUTF8 = "1"
+```
+
+### ラッパースキル `gougi` のインストール方法
+
+ラッパーは `deliberate` を呼び出し、呼び出し側が結果を整理するためのスキルです。先に各クライアントへAI-Gougi MCPを登録してください。スキルのコピーだけではMCP接続は登録されません。既定の2ラウンドを待てるよう、ツール待ち時間は1300秒以上にします。
+
+リポジトリのルートで以下のPowerShellを実行すると、Claude CodeとCodexの両方へグローバルにインストールできます。
+
+```powershell
+$gougiSource = Join-Path (Get-Location).Path 'plugins\ai-gougi\skills\gougi'
+$gougiClaudeSkills = Join-Path $env:USERPROFILE '.claude\skills'
+$gougiCodexSkills = if ($env:CODEX_HOME) {
+    Join-Path $env:CODEX_HOME 'skills'
+} else {
+    Join-Path $env:USERPROFILE '.codex\skills'
+}
+New-Item -ItemType Directory -Force -Path $gougiClaudeSkills, $gougiCodexSkills | Out-Null
+Copy-Item -LiteralPath $gougiSource -Destination $gougiClaudeSkills -Recurse -Force
+Copy-Item -LiteralPath $gougiSource -Destination $gougiCodexSkills -Recurse -Force
+```
+
+配置先は `~/.claude/skills/gougi/` と `~/.codex/skills/gougi/`（または `$CODEX_HOME/skills/gougi/`）です。片方だけに導入する場合は、そのクライアントの `Copy-Item` 行だけ実行してください。導入後は新しいセッションを開き、Claude Codeでは `/mcp` でAI-Gougiの接続も確認します。
+
+[ラッパーのパッケージ](plugins/ai-gougi/README.md)はAgent Plugins Specification 1.0.0に準拠しています。対応クライアントでは `plugins/ai-gougi/` をプラグインのルートとして登録すると、`skills/` から `gougi` が検出されます。呼び出し名はクライアントのスキル一覧で確認してください。
+
+### ラッパースキルの使い方
+
+| クライアント | 入力例 |
+|---|---|
+| Claude Code | `/gougi この設計の妥当性と改善点を検討して` |
+| Codex | `$gougi この設計の妥当性と改善点を検討して` |
+
+既定では独立意見（R1）と反論・再検討（R2）を実行し、司会が共通点・対立点・推奨案を整理します。参加者の失敗やラウンド省略も明記します。
+
+独立意見だけを集めたい場合：
+
+```text
+/gougi 独立意見だけで、3モジュールを段階移行する是非を検討して
+```
+
+Codexでは先頭を `$gougi` に置き換えます。会話内の文脈が必要なテーマでは、対象ファイルや背景も示してください。参加者CLIには司会の会話履歴が渡りません。MCPツールが利用できない場合は、その旨を報告して終了します。
+
+### 中間生成物・最終成果物の出力先
+
+| 生成物 | 出力先 |
+|---|---|
+| 中間生成物：R1の独立意見 | MCPの返却JSON内の `structuredContent.rounds[0].results[].stdout` |
+| 中間生成物：R2の反論・再検討 | R2実施時の `structuredContent.rounds[1].results[].stdout` |
+| 各参加者のエラー・実行情報 | `structuredContent.rounds[].results[]` 内の `stderr`、`error_code` など |
+| 最終成果物：司会が整理した共通点・対立点・推奨案 | 呼び出し側クライアントのチャット回答 |
+| サーバーの診断ログ | サーバーのstderr。MCPクライアント側で扱います |
+
+MCPの `content` にも同じ結果JSONが返ります。ラウンドの結果はメモリ内で保持し、ツールの完了時にまとめて返すため、途中のファイル出力やストリーミングは行いません。現在のサーバーとラッパーには、固定の出力フォルダーや最終成果物の自動ファイル保存はありません。ファイルとして残す場合は、呼び出し側クライアントに保存先を指定して別途保存を依頼してください。`WORKDIR` は参加者CLIの作業と変更検査の対象フォルダーです。
 
 ## MCP ツール
 

@@ -124,9 +124,10 @@ Use `$gougi` instead in Codex. Provide the target file or relevant background wh
 | Intermediate results: R2 rebuttals and reconsideration | The MCP response: `structuredContent.rounds[1].results[].stdout`, when R2 runs |
 | Participant errors and execution details | Each result's `stderr`, `error_code`, and other fields in `structuredContent.rounds[].results[]` |
 | Final result: the moderator's common ground, disagreements, and recommendation | The calling client's chat response |
+| Deliberation record: conclusion, metadata, and all responses | `docs/gougi/YYYY-MM-DD-<slug>.md` in the working project (when using the gougi skill) |
 | Server diagnostic logs | The server's stderr, handled by the MCP client |
 
-The same result JSON is also returned in MCP `content`. Round results are collected in memory and returned when the tool call completes; AI-Gougi does not stream or save them to intermediate files. The server and wrapper have no fixed output directory or automatic file persistence for the final result. To retain files, ask the calling client to save the results to a specified path separately. `WORKDIR` identifies the participant CLIs' working directory and the directory checked for changes.
+The same result JSON is also returned in MCP `content`. Round results are collected in memory and returned when the tool call completes; AI-Gougi does not stream or save them to intermediate files. The server and wrapper do not write files. When using the gougi skill, the moderator (the calling client) saves the deliberation record as Markdown. Specify another path along with the topic to change the location, or say not to save to skip the record. Nothing is saved when no participant succeeds. `WORKDIR` identifies the participant CLIs' working directory and the directory checked for changes.
 
 ## MCP tools
 

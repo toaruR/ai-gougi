@@ -15,6 +15,8 @@ class Config:
     BIN_codex: str = "codex"
     BIN_agy: str = "agy"
     TIMEOUT_SEC: int = 600
+    AGY_EMPTY_OUTPUT_RETRIES: int = 2
+    AGY_RETRY_DELAY_SEC: int = 1
     KILL_WAIT_SEC: int = 5
     TASKKILL_FLAGS: str = "/T /F"
     CHILD_ENV_EXTRA: str = "PYTHONUTF8=1"
@@ -37,6 +39,11 @@ class Config:
     SNAPSHOT_MAX_FILES: int = 5000
     SNAPSHOT_EXCLUDE: tuple = (".git", "node_modules")
     PARTICIPANT_ORDER: tuple = ("claude", "codex", "agy")
+
+    def __post_init__(self):
+        for name in ("AGY_EMPTY_OUTPUT_RETRIES", "AGY_RETRY_DELAY_SEC"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{ENV_PREFIX}{name} must be >= 0")
 
 
 def _parse(name: str, default, raw: str):

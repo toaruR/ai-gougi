@@ -6,7 +6,8 @@ import sys
 
 from .config import Config, get_config
 
-KINDS = ("decode_replaced", "newline_replaced", "nongit_workdir", "startup_env")
+KINDS = ("decode_replaced", "newline_replaced", "nongit_workdir", "startup_env",
+         "empty_output_retry")
 
 
 def log_event(kind: str, msg: str) -> None:

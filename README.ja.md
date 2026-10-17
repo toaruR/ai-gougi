@@ -143,6 +143,8 @@ MCPの `content` にも同じ結果JSONが返ります。ラウンドの結果�
 
 エラーコード: `INVALID_INPUT`, `PROMPT_TOO_LONG`, `THEME_TOO_LONG`, `CMDLINE_TOO_LONG`(agy のみ), `CLI_NOT_FOUND`, `SPAWN_FAILED`, `TIMEOUT`, `NONZERO_EXIT`, `EMPTY_OUTPUT`, `BUSY`, `ALL_FAILED`。
 
+agy の `EMPTY_OUTPUT` は同じタイムアウト内で最大2回再試行します（初回を含め3回、待機は1秒・2秒）。他のエラーは即時に返し、空出力が続いた場合も失敗として返します。`ask_agy` と `deliberate` の各ラウンドに適用され、再試行状況はサーバーの stderr に記録します。
+
 ## 設定
 
 全設定は環境変数 `AI_GOUGI_<名前>` で上書きできます。主なもの:
@@ -151,7 +153,9 @@ MCPの `content` にも同じ結果JSONが返ります。ラウンドの結果�
 |---|---|---|
 | `WORKDIR` | 起動時 cwd | 子プロセスの cwd・スナップショット対象 |
 | `BIN_claude` / `BIN_codex` / `BIN_agy` | `claude` / `codex` / `agy` | 実行ファイル(`PATH` 解決) |
-| `TIMEOUT_SEC` | 600 | CLI 1 回の実行上限 |
+| `TIMEOUT_SEC` | 600 | 呼出しの実行上限（agy の再試行・待機を含む） |
+| `AGY_EMPTY_OUTPUT_RETRIES` | 2 | agy の `EMPTY_OUTPUT` に対する追加試行回数。0で無効 |
+| `AGY_RETRY_DELAY_SEC` | 1 | 再試行の基準待機秒数。試行番号を掛ける（1秒、2秒…） |
 | `PROMPT_MAX_CHARS` | 7000 | `prompt` の上限 |
 | `THEME_MAX_CHARS` | 1500 | `theme` の上限 |
 | `OUTPUT_MAX_CHARS` | 20000 | stdout 切り詰め上限(先頭を残す) |

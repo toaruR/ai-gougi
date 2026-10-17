@@ -14,7 +14,7 @@ from typing import Optional, Union
 from .cmdline import apply_newline, check_cmdline_len
 from .config import Config, get_config
 from .killtree import kill_tree
-from .logging_util import log_decode_replaced
+from .logging_util import log_decode_replaced, log_event
 from .schema import AskResult, make_ask_result, make_prelaunch_error
 from .slots import SlotPool
 from .snapshot import Snapshot, compare_snapshots, take_snapshot
@@ -141,7 +141,7 @@ def _snapshot(c: Config) -> Snapshot:
         return Snapshot(skipped=True)
 
 
-async def _execute(plan: LaunchPlan) -> AskResult:
+async def _execute(plan: LaunchPlan, *, timeout: float | None = None) -> AskResult:
     """実行段A+B: 起動・stdin/EOF・TIMEOUT 待機・kill_tree・decode・切詰め・snapshot・ok 判定。"""
     c = plan.cfg
     p = plan.participant
@@ -176,7 +176,11 @@ async def _execute(plan: LaunchPlan) -> AskResult:
     ]
 
     # 部分出力を保持するため communicate() ではなく自前 reader + asyncio.wait(timeout)
-    _, pending = await asyncio.wait(all_t, timeout=c.TIMEOUT_SEC)
+    # 共有時間予算を渡された場合、snapshot・起動に使った時間も差し引く。
+    wait_timeout = (c.TIMEOUT_SEC if timeout is None else
+                    max(0, timeout - (time.monotonic() - t0)))
+    _, pending = await asyncio.wait(
+        all_t, timeout=wait_timeout)
     timed_out = bool(pending)
     if timed_out:
         await kill_tree(proc, c)
@@ -224,12 +228,49 @@ async def run_cli(
     pool: SlotPool | None = None,
     reserved: bool = False,
 ) -> AskResult:
-    """起動前段 + 実行段A。枠は全経路で解放する。"""
+    """起動前検証 + 実行。agy の空出力は同じ時間予算・枠内で再試行する。"""
     plan = prelaunch(participant, prompt, pool=pool, reserved=reserved)
     if not isinstance(plan, LaunchPlan):
         return plan
     try:
-        return await _execute(plan)
+        if participant != "agy":
+            return await _execute(plan)
+        c = plan.cfg
+        t0 = time.monotonic()
+        deadline = t0 + c.TIMEOUT_SEC
+        attempts = 0
+        checks = set()
+        while True:
+            result = await _execute(plan, timeout=max(0, deadline - time.monotonic()))
+            attempts += 1
+            checks.add(result["workdir_check"])
+            result["workdir_check"] = (
+                "changed" if "changed" in checks else
+                "skipped" if "skipped" in checks else "unchanged")
+            result["duration_ms"] = int((time.monotonic() - t0) * 1000)
+            if result["error_code"] != "EMPTY_OUTPUT":
+                if attempts > 1:
+                    log_event("empty_output_retry",
+                              f"agy finished attempts={attempts} ok={result['ok']} "
+                              f"error_code={result['error_code']}")
+                return result
+            delay = c.AGY_RETRY_DELAY_SEC * attempts
+            retry = (attempts <= c.AGY_EMPTY_OUTPUT_RETRIES
+                     and deadline - time.monotonic() > delay)
+            log_event("empty_output_retry",
+                      f"agy EMPTY_OUTPUT attempts={attempts} retry={retry} "
+                      f"delay_sec={delay if retry else 0} "
+                      f"stderr_chars={result['stderr_total_chars']}")
+            if not retry:
+                result["error_message"] = f"stdout is empty (after {attempts} attempts)"
+                return result
+            await asyncio.sleep(delay)
+            # 待機中に時間予算を使い切った場合は、次のプロセスを起動しない。
+            if time.monotonic() >= deadline:
+                result["duration_ms"] = int((time.monotonic() - t0) * 1000)
+                result["error_message"] = (
+                    f"stdout is empty (after {attempts} attempts; retry time budget exhausted)")
+                return result
     finally:
         if plan.slot_held:
             (pool if pool is not None else POOL).release(1)

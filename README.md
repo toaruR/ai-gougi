@@ -143,6 +143,8 @@ Results are returned in `structuredContent` (the same JSON is also in `content`)
 
 Error codes: `INVALID_INPUT`, `PROMPT_TOO_LONG`, `THEME_TOO_LONG`, `CMDLINE_TOO_LONG` (agy only), `CLI_NOT_FOUND`, `SPAWN_FAILED`, `TIMEOUT`, `NONZERO_EXIT`, `EMPTY_OUTPUT`, `BUSY`, `ALL_FAILED`.
 
+For agy only, `EMPTY_OUTPUT` is retried up to twice (three attempts total), with 1s and 2s waits within the same timeout budget. Other errors are returned immediately. Retry events go to server stderr; persistent empty output remains an error. This applies to both `ask_agy` and each `deliberate` round.
+
 ## Configuration
 
 Every setting can be overridden with an environment variable `AI_GOUGI_<NAME>`. Main ones:
@@ -151,7 +153,9 @@ Every setting can be overridden with an environment variable `AI_GOUGI_<NAME>`. 
 |---|---|---|
 | `WORKDIR` | startup cwd | Child process cwd and snapshot target |
 | `BIN_claude` / `BIN_codex` / `BIN_agy` | `claude` / `codex` / `agy` | Executables (resolved via `PATH`) |
-| `TIMEOUT_SEC` | 600 | Limit per CLI run |
+| `TIMEOUT_SEC` | 600 | Limit per call, including agy retries and backoff |
+| `AGY_EMPTY_OUTPUT_RETRIES` | 2 | Extra attempts for agy `EMPTY_OUTPUT`; 0 disables retries |
+| `AGY_RETRY_DELAY_SEC` | 1 | Base retry delay in seconds, multiplied by the retry number (1s, 2s, …) |
 | `PROMPT_MAX_CHARS` | 7000 | Max `prompt` length |
 | `THEME_MAX_CHARS` | 1500 | Max `theme` length |
 | `OUTPUT_MAX_CHARS` | 20000 | stdout truncation limit (keeps head) |

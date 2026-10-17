@@ -10,6 +10,7 @@ from ai_gougi.config import get_config, keep, marker_len, n_safe, return_cap, t_
 def test_defaults_match_table():
     c = get_config()
     assert (c.TIMEOUT_SEC, c.KILL_WAIT_SEC) == (600, 5)
+    assert (c.AGY_EMPTY_OUTPUT_RETRIES, c.AGY_RETRY_DELAY_SEC) == (2, 1)
     assert (c.PROMPT_MAX_CHARS, c.CMDLINE_MAX_CHARS, c.AGY_EXE_LEN_REF) == (7000, 8000, 38)
     assert (c.CMDLINE_FIXED_CHARS, c.THEME_MAX_CHARS, c.OPINION_MAX_CHARS) == (6, 1500, 2000)
     assert (c.OUTPUT_MAX_CHARS, c.STDERR_MAX_CHARS) == (20000, 4000)

@@ -183,11 +183,20 @@ async def _execute(plan: LaunchPlan, *, timeout: float | None = None) -> AskResu
         all_t, timeout=wait_timeout)
     timed_out = bool(pending)
     if timed_out:
-        await kill_tree(proc, c)
-        # kill 後、パイプ閉鎖(読取完了)を KILL_WAIT_SEC まで待つ。部分出力は保持。
+        # taskkill・回収・パイプ閉鎖待ちは 1 つの KILL_WAIT_SEC 期限を共有する
+        # (elapsed ≤ T_max = TIMEOUT_SEC + KILL_WAIT_SEC を守るため)。部分出力は保持。
+        kill_deadline = time.monotonic() + c.KILL_WAIT_SEC
+
+        def kill_left() -> float:
+            return max(0, kill_deadline - time.monotonic())
+
+        try:
+            await asyncio.wait_for(kill_tree(proc, c), kill_left())
+        except asyncio.TimeoutError:
+            pass  # taskkill はスレッドで続行する。待ちだけ打ち切る
         rest = [t for t in all_t if not t.done()]
         if rest:
-            _, pending = await asyncio.wait(rest, timeout=c.KILL_WAIT_SEC)
+            _, pending = await asyncio.wait(rest, timeout=kill_left())
             for t in pending:
                 t.cancel()
             if pending:

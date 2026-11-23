@@ -74,6 +74,7 @@ owner: ai
 - 起動自体の失敗は SPAWN_FAILED。例外文が `error_message` に入る。
 - `TIMEOUT_SEC` は 1 回の呼び出しの実行上限である。agy では再試行と待機を含む(3.5 節)。
 - `TIMEOUT_SEC` を超えると、サーバーはプロセスツリーを `taskkill` で kill する。部分出力は残る。
+- kill 後の taskkill 実行・回収・パイプ閉鎖待ちは、合わせて `KILL_WAIT_SEC` 以内に打ち切る。`taskkill` 自体が 1 秒以上かかる環境でも上限 `TIMEOUT_SEC + KILL_WAIT_SEC` を守るためである。
 - `ok` は「タイムアウトなし・exit 0・stdout が空白以外」の 3 条件をすべて満たすときだけ真である。
 - exit が 0 以外なら NONZERO_EXIT。exit 0 で stdout が空白のみなら EMPTY_OUTPUT。
 - stdout は先頭 `OUTPUT_MAX_CHARS` 字を残す。stderr は末尾 `STDERR_MAX_CHARS` 字を残す。

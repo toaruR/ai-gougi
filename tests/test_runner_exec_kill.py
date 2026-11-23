@@ -35,6 +35,10 @@ def shim(tmp_path, monkeypatch, script: str, name="claude"):
 @pytest.mark.at("AT-03")
 def test_at03_timeout_kill_duration(tmp_path, monkeypatch):
     apply_env(monkeypatch, tmp_path)
+    # WORKDIR を分離する(既定の cwd=リポジトリ直下だと .venv 等の snapshot に秒単位かかり上限を超える)
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    monkeypatch.setenv("AI_GOUGI_WORKDIR", str(wd))
     monkeypatch.setenv("STUB_MODE", "sleep")
     monkeypatch.setenv("STUB_SLEEP_SEC", "60")
     monkeypatch.setenv("AI_GOUGI_TIMEOUT_SEC", "3")

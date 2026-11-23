@@ -74,6 +74,8 @@ The following protocol applies **ONLY during `strict-goal` workflows** (e.g., re
 
 - （ここに知見を追記していく）
 - **rtk フック経由の pytest は出力が壊れる**: `rtk proxy python -m pytest ...` で実行すること。
+- **pytest は `.venv` に別途必要**: 依存定義ファイルが無く `.venv` に pytest が入らない。`.venv\Scripts\python.exe -m pip install pytest` で入れる。
+- **時間上限を測るテストは WORKDIR を tmp に分離する**: 既定 WORKDIR(リポジトリ直下)は `.venv` を含み snapshot が前後で各約0.8秒かかる。`SNAPSHOT_EXCLUDE` は `.git,node_modules` のみ。
 - **`import tests.*` が site-packages の別 `tests` に隠される**: `tests/__init__.py` 必須。→ 詳細: @docs/guides/ai-gougi-usage.md §6
 - **日本語コミット件名の `git log` を Python(cp932)で読むと UnicodeDecodeError**: `git config --local i18n.logOutputEncoding cp932` で回避（PYTHONUTF8=1 は tasklist デコードを壊すので不可）。→ 詳細: @docs/guides/ai-gougi-usage.md §6
 <!-- knowledge-kit:end section=gotchas -->

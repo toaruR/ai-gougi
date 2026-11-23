@@ -2135,7 +2135,7 @@
   {
    "id": "T027",
    "title": "受入網羅マップ(設計9節)と全スイート最終統合",
-   "intent": "設計9節『stub を BIN_* で差し替える』の AT 表と7節の F 表の網羅を自動検査する。tests/coverage_map.py に NOT_GUARDED(F21〜F28 → 設計書の 'not guarded' 文言)と check(drop=None)->問題数を持たせ、tests/test_coverage_map.py が docs/design-ai-gougi.md をパースして (1) `| AT-nn |` 行の全 ID(24件)が tests/*.py の pytest.mark.at を付けた試験にマップされること、(2) `| Fn |` 行の全 ID(F1..F28、28件)が AT 表の F 列経由の試験マップか NOT_GUARDED に含まれること、(3) NOT_GUARDED の各 F は設計書の該当行に '**not guarded**' が実在することを assert する。check(drop='AT-07') のように 1 件落とすと問題数>0 になる負例も試験する。最後に全スイートを実行する。スコープ外(パッケージング/配布、CI、運用手順書、認証管理、ラウンド3自動化、他のラウンド制御ツール、永続化)は実装しない。",
+   "intent": "設計9節『stub を BIN_* で差し替える』の AT 表と7節の F 表の網羅を自動検査する。tests/coverage_map.py に NOT_GUARDED(F21〜F28 → 設計書の 'not guarded' 文言)と check(drop=None)->問題数を持たせ、tests/test_coverage_map.py が docs/spec/design-ai-gougi.md をパースして (1) `| AT-nn |` 行の全 ID(24件)が tests/*.py の pytest.mark.at を付けた試験にマップされること、(2) `| Fn |` 行の全 ID(F1..F28、28件)が AT 表の F 列経由の試験マップか NOT_GUARDED に含まれること、(3) NOT_GUARDED の各 F は設計書の該当行に '**not guarded**' が実在することを assert する。check(drop='AT-07') のように 1 件落とすと問題数>0 になる負例も試験する。最後に全スイートを実行する。スコープ外(パッケージング/配布、CI、運用手順書、認証管理、ラウンド3自動化、他のラウンド制御ツール、永続化)は実装しない。",
    "design_refs": [
     "## 7. 失敗モードと対策の対応表（1モード＝主機構1つ）",
     "スコープ外: パッケージング/配布、CI、運用手順書、認証管理、ラウンド3の自動化",

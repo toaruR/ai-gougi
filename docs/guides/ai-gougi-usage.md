@@ -1,6 +1,10 @@
+---
+type: guide
+owner: ai
+---
 # AI-Gougi 利用ガイド
 
-実装(`ai_gougi/`)に基づく公開インターフェースの説明。設計は `docs/design-ai-gougi.md` を参照。
+実装(`ai_gougi/`)に基づく公開インターフェースの説明。設計は `docs/spec/design-ai-gougi.md` を参照。
 
 ## 1. 起動
 

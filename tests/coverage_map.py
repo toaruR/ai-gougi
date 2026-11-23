@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DESIGN = ROOT / "docs" / "design-ai-gougi.md"
+DESIGN = ROOT / "docs" / "spec" / "design-ai-gougi.md"
 TESTS_DIR = Path(__file__).resolve().parent
 
 NOT_GUARDED_MARK = "**not guarded**"

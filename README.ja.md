@@ -163,7 +163,7 @@ agy の `EMPTY_OUTPUT` は同じタイムアウト内で最大2回再試行し�
 | `MAX_CONCURRENT_PROCS` | 3 | 同時子プロセス数 |
 | `PARTICIPANT_ORDER` | `claude,codex,agy` | `deliberate` の参加者順 |
 
-全項目は [docs/ai-gougi-usage.md](docs/ai-gougi-usage.md) を参照してください。
+全項目は [docs/guides/ai-gougi-usage.md](docs/guides/ai-gougi-usage.md) を参照してください。
 
 ## テスト
 
@@ -175,8 +175,8 @@ python -m pytest -q --strict-markers
 
 ## ドキュメント
 
-- [docs/design-ai-gougi.md](docs/design-ai-gougi.md) – 設計書
-- [docs/ai-gougi-usage.md](docs/ai-gougi-usage.md) – 利用ガイド
+- [docs/spec/design-ai-gougi.md](docs/spec/design-ai-gougi.md) – 設計書
+- [docs/guides/ai-gougi-usage.md](docs/guides/ai-gougi-usage.md) – 利用ガイド
 
 ## ライセンス
 

@@ -1,3 +1,7 @@
+---
+type: spec
+owner: ai
+---
 <!-- spec-doc:last-reviewed-commit=c1a115493b4198176278dd04120217e375157dad reviewed-at=2026-10-18 -->
 
 # 仕様書
@@ -11,7 +15,7 @@
 -->
 
 数式・境界値・受入テストの詳細は [design-ai-gougi.md](design-ai-gougi.md) を正とする。
-引数・結果キー・環境変数の一覧は [ai-gougi-usage.md](ai-gougi-usage.md) を参照する。
+引数・結果キー・環境変数の一覧は [ai-gougi-usage.md](../guides/ai-gougi-usage.md) を参照する。
 この文書は振る舞いの要点をまとめる。
 
 ## 1. 全体構成

@@ -1,3 +1,7 @@
+---
+type: spec
+owner: ai
+---
 # AI-Gougi 設計書
 
 ## 1. 背景と目的

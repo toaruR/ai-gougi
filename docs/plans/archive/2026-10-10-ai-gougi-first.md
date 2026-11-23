@@ -1,3 +1,9 @@
+---
+type: plan
+status: done
+title: AI-Gougi（マルチAI合議MCPサーバー）
+owner: human
+---
 # AI-Gougi（マルチAI合議MCPサーバー）
 
 ## 目的

@@ -14,7 +14,7 @@ from ai_gougi.schema import (
     validate,
 )
 
-DESIGN = (Path(__file__).resolve().parent.parent / "docs" / "design-ai-gougi.md").read_text(encoding="utf-8")
+DESIGN = (Path(__file__).resolve().parent.parent / "docs" / "spec" / "design-ai-gougi.md").read_text(encoding="utf-8")
 SEC = DESIGN.split("### 5.1 JSON Schema", 1)[1].split("### 5.2", 1)[0]
 BLOCKS = re.findall(r"```json\n(.*?)\n```", SEC, re.S)
 

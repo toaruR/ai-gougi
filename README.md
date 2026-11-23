@@ -163,7 +163,7 @@ Every setting can be overridden with an environment variable `AI_GOUGI_<NAME>`. 
 | `MAX_CONCURRENT_PROCS` | 3 | Concurrent child processes |
 | `PARTICIPANT_ORDER` | `claude,codex,agy` | Participant order in `deliberate` |
 
-See [docs/ai-gougi-usage.md](docs/ai-gougi-usage.md) for the full list (Japanese).
+See [docs/guides/ai-gougi-usage.md](docs/guides/ai-gougi-usage.md) for the full list (Japanese).
 
 ## Tests
 
@@ -175,8 +175,8 @@ python -m pytest -q --strict-markers
 
 ## Documentation
 
-- [docs/design-ai-gougi.md](docs/design-ai-gougi.md) – design document (Japanese)
-- [docs/ai-gougi-usage.md](docs/ai-gougi-usage.md) – usage guide (Japanese)
+- [docs/spec/design-ai-gougi.md](docs/spec/design-ai-gougi.md) – design document (Japanese)
+- [docs/guides/ai-gougi-usage.md](docs/guides/ai-gougi-usage.md) – usage guide (Japanese)
 
 ## License
 

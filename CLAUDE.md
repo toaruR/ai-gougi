@@ -1,12 +1,27 @@
-<!-- knowledge-kit:begin section=general-instructions version=1.13.0 -->
+<!-- knowledge-kit:begin section=general-instructions version=1.16.4 -->
 ## Communication Style
 - Use Caveman mode.
 - Drop filler words, preambles, and recaps.
 - Be extremely concise. Keep explanations under 2 sentences.
 - Full code, minimal chatter.
 
-## プランの保存場所
-planモードで作成したマークダウンファイルは、<プロジェクトルート>docs/plans 以下に保存する。
+## ドキュメント配置ルール
+`docs/` には次の置き場以外にファイルを作らない(ルールの実体: `docs/.docs-policy.json`。整理は `/docs-tidy`)。
+
+| 置き場 | 中身 | frontmatter の type |
+|---|---|---|
+| `docs/spec/` | 今どうなっているか(仕様・アーキ・設計)。書き換えて最新に保つ | `spec` |
+| `docs/decisions/` | なぜそう決めたか(ADR)。書いたら変えない | `decision` |
+| `docs/research/` | 調査・比較・ベンチ。`YYYY-MM-DD-slug.md` | `research` |
+| `docs/guides/` | 人間向けの説明・手順・原理解説 | `guide` |
+| `docs/plans/` | 計画(plan モードの成果物を含む)。`YYYY-MM-DD-slug.md`。終わったら `plans/archive/` | `plan` |
+| `docs/assets/` | 画像 | — |
+| `docs/exports/` | html / pdf / pptx などの派生物(正本と同じ相対パス) | — |
+
+- `.md` の先頭に frontmatter(`type`、plan/decision は `status: draft|active|done|superseded`、`owner: ai|human`)を付ける。日付は書かない(git から分かる)。
+- ファイル名は英小文字・数字・ハイフンの kebab-case。日付付きの複製(`xxx_20261015.md` 等)は作らず、元のファイルを直接更新する。
+- 新しいファイルを作る前に、既存ファイルへの追記で済まないか検討する。
+- ビルド・変換の作業ファイルは `docs/` の外(`.cache/` 等)に置き、最終成果物だけを `docs/exports/` に置く。
 
 ## 返信の言語
 最終的な返信は日本語で出力する。
@@ -30,7 +45,7 @@ The following protocol applies **ONLY during `strict-goal` workflows** (e.g., re
 - **Autonomous Scope Selection**: On `strict-goal design`, select rubric at `loop_open` based on prompt boundaries: generic `design` (8 criteria) for software/classes, or `design.harness` (18 criteria) for agent/harness infrastructure.
 <!-- knowledge-kit:end section=general-instructions -->
 
-<!-- knowledge-kit:begin section=recording-rules version=1.13.0 -->
+<!-- knowledge-kit:begin section=recording-rules version=1.16.4 -->
 ## 知見の記録ルール
 
 **作業中に重要な知見を発見したら、ユーザーの指示を待たず自動で記録すること。**
@@ -44,7 +59,7 @@ The following protocol applies **ONLY during `strict-goal` workflows** (e.g., re
 記録したら「〇〇をハマりポイントに追記しました」と一言報告する。
 <!-- knowledge-kit:end section=recording-rules -->
 
-<!-- knowledge-kit:begin section=gotchas version=1.13.0 -->
+<!-- knowledge-kit:begin section=gotchas version=1.16.4 -->
 ## ハマりポイント
 
 <!--
@@ -58,7 +73,7 @@ The following protocol applies **ONLY during `strict-goal` workflows** (e.g., re
 -->
 
 - （ここに知見を追記していく）
-- pytest は `rtk proxy python -m pytest ...` で実行する。rtk フック経由だと出力が壊れる。
-- `import tests.*` が site-packages の別 `tests` パッケージに隠される。`tests/__init__.py` 必須。
-- 日本語コミット件名の `git log` を Python(cp932)で読むと UnicodeDecodeError。`git config --local i18n.logOutputEncoding cp932` で回避（PYTHONUTF8=1 は tasklist デコードを壊すので不可）。
+- **rtk フック経由の pytest は出力が壊れる**: `rtk proxy python -m pytest ...` で実行すること。
+- **`import tests.*` が site-packages の別 `tests` に隠される**: `tests/__init__.py` 必須。→ 詳細: @docs/guides/ai-gougi-usage.md §6
+- **日本語コミット件名の `git log` を Python(cp932)で読むと UnicodeDecodeError**: `git config --local i18n.logOutputEncoding cp932` で回避（PYTHONUTF8=1 は tasklist デコードを壊すので不可）。→ 詳細: @docs/guides/ai-gougi-usage.md §6
 <!-- knowledge-kit:end section=gotchas -->

@@ -24,3 +24,9 @@ __pycache__/
 .agents/hooks/
 .agents/hooks.json
 docs/knowledge-kit-usage.md
+.bm25_sessions.db
+.bm25_sessions.db-wal
+.bm25_sessions.db-shm
+.bm25_sessions.json
+.cache/
+docs/guides/knowledge-kit-usage.md

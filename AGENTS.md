@@ -1,8 +1,8 @@
-<!-- knowledge-kit:begin section=agents-entry version=1.13.0 -->
+<!-- knowledge-kit:begin section=agents-entry version=1.16.4 -->
 # AGENTS.md
 
 ## 最重要: CLAUDE.md を必ず先に読むこと
-このプロジェクトのすべてのルール（メモリーシステム・プランの保存場所・開発規約など）は **`CLAUDE.md` がプライマリです。**
+このプロジェクトのすべてのルール（メモリーシステム・ドキュメント配置ルール・開発規約など）は **`CLAUDE.md` がプライマリです。**
 タスクを開始する前に `CLAUDE.md` を読み、その指示に従ってください。
 
 ## Skills

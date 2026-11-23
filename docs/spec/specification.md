@@ -1,4 +1,4 @@
-<!-- spec-doc:last-reviewed-commit=539c0e4e741b7e435a8e11362354e172a93c5560 reviewed-at=2026-10-14 -->
+<!-- spec-doc:last-reviewed-commit=c1a115493b4198176278dd04120217e375157dad reviewed-at=2026-10-18 -->
 
 # 仕様書
 
@@ -31,7 +31,7 @@
 - WORKDIR が git 管理外なら、サーバーは警告を 1 行出す。起動は続ける。
 - stdout は MCP 通信専用である。ログはすべて stderr に出す。
 - ログ 1 行の書式は `[ai_gougi] <kind>: <msg>` である。
-- kind は `decode_replaced`・`newline_replaced`・`nongit_workdir`・`startup_env` の 4 種だけである。未知の kind は ValueError になる。
+- kind は `decode_replaced`・`newline_replaced`・`nongit_workdir`・`startup_env`・`empty_output_retry` の 5 種だけである。未知の kind は ValueError になる。
 
 ## 3. MCP ツール
 
@@ -68,6 +68,7 @@
 - 起動前検証の順序: INVALID_INPUT → PROMPT_TOO_LONG → BUSY → CLI_NOT_FOUND → CMDLINE_TOO_LONG。
 - 起動前エラーは `exit_code=null`・`workdir_check="skipped"` を返す。文字列は空、数値は 0。
 - 起動自体の失敗は SPAWN_FAILED。例外文が `error_message` に入る。
+- `TIMEOUT_SEC` は 1 回の呼び出しの実行上限である。agy では再試行と待機を含む(3.5 節)。
 - `TIMEOUT_SEC` を超えると、サーバーはプロセスツリーを `taskkill` で kill する。部分出力は残る。
 - `ok` は「タイムアウトなし・exit 0・stdout が空白以外」の 3 条件をすべて満たすときだけ真である。
 - exit が 0 以外なら NONZERO_EXIT。exit 0 で stdout が空白のみなら EMPTY_OUTPUT。
@@ -88,6 +89,52 @@
 - ファイル数が `SNAPSHOT_MAX_FILES` を超えると `skipped` になる。
 - `SNAPSHOT_EXCLUDE`(既定 `.git`・`node_modules`)は比較対象外である。
 - 検知だけを行う。書込を防ぐ機能ではない(agy は読み取り専用フラグを持たない)。
+
+### 3.5 agy の空出力再試行
+
+- agy の結果が EMPTY_OUTPUT のとき、サーバーは同じプロンプトで agy を再起動する。
+- 追加試行の上限は `AGY_EMPTY_OUTPUT_RETRIES`(既定 2)である。初回を含め最大 3 回になる。
+- 待機秒数は `AGY_RETRY_DELAY_SEC` × 試行済み回数である。既定では 1 秒、2 秒になる。
+- 再試行は `ask_agy` と deliberate の各ラウンドに適用される。
+- claude・codex は再試行しない。EMPTY_OUTPUT 以外のエラーも再試行しない。
+- 理由: 認証エラー等の NONZERO_EXIT は繰り返しても解決しない。
+
+時間予算と枠:
+
+- 全試行と待機は 1 つの `TIMEOUT_SEC` を共有する。
+- 各試行の待機上限は残り予算である。スナップショット・起動に使った時間も差し引く。
+- 試行中に予算が尽きると、結果は TIMEOUT になる。
+- 残り予算が次の待機秒数以下なら、サーバーは再起動しない。最後の EMPTY_OUTPUT を返す。
+- 待機中に予算が尽きたときも、サーバーは再起動しない。`error_message` に予算切れを記す。
+- 全試行は最初に予約した枠を使い続ける。枠は最後に 1 回だけ解放する。
+
+結果の合成:
+
+- `duration_ms` は待機を含む合計時間である。
+- stdout・stderr・文字数・切詰め情報は最後の試行の値である。
+- `workdir_check` は全試行を集約する。1 回でも `changed` なら `changed` である。
+- `changed` が無く `skipped` が 1 回でもあれば `skipped` である。
+- 空出力のまま終わると、`error_message` が試行回数を含む(例: `stdout is empty (after 3 attempts)`)。
+- 空の意見は成功扱いにならない。
+- 子プロセスのファイル操作は巻き戻さない。
+
+ログ:
+
+- EMPTY_OUTPUT のたびに、サーバーは `empty_output_retry` を 1 行出す。内容は試行回数・再試行有無・待機秒数・stderr 文字数である。
+- 再試行後に EMPTY_OUTPUT 以外で終わると、試行回数・ok・error_code を 1 行出す。
+- ログはプロンプト・応答本文を含まない。
+
+```mermaid
+flowchart TD
+    A[agy を起動] --> B{EMPTY_OUTPUT?}
+    B -- いいえ --> R[結果を返す]
+    B -- はい --> C{追加試行が上限内 かつ 残り予算 > 待機秒数?}
+    C -- いいえ --> E[EMPTY_OUTPUT を返す]
+    C -- はい --> D[待機]
+    D --> F{予算が残る?}
+    F -- はい --> A
+    F -- いいえ --> E
+```
 
 ## 4. deliberate(合議)
 
@@ -125,6 +172,8 @@ stateDiagram-v2
 - 全設定は `AI_GOUGI_<名前>` で上書きできる。既定値は `ai_gougi/config.py` にある。
 - 設定は呼び出しごとに読む。キャッシュしない。
 - 整数項目に変換できない値は ValueError になる。
+- `AGY_EMPTY_OUTPUT_RETRIES`・`AGY_RETRY_DELAY_SEC` は 0 以上である。負の値は ValueError になる。
+- `AGY_EMPTY_OUTPUT_RETRIES=0` で agy の空出力再試行は無効になる。
 - タプル項目はカンマ区切りで書く。
 - `CHILD_ENV_EXTRA` を空文字にすると、追加環境変数は無効になる。起動ログがその旨を記録する。
 
@@ -197,3 +246,5 @@ flowchart TD
 - **起動前エラー**: CLI を起動せずに返すエラー(INVALID_INPUT〜CMDLINE_TOO_LONG と BUSY)。
 - **枠**: 同時実行数の予約単位。上限は `MAX_CONCURRENT_PROCS`。
 - **合議記録**: gougi スキルが保存する Markdown ファイル。
+- **時間予算**: 1 回の呼び出しが使える合計時間。`TIMEOUT_SEC` に等しい。agy では全試行と待機で共有する。
+- **試行**: agy の 1 回の起動。再試行で 1 呼び出しに複数回ある。

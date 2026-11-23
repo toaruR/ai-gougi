@@ -77,6 +77,13 @@ AskResult.error_code: `INVALID_INPUT`, `PROMPT_TOO_LONG`, `CMDLINE_TOO_LONG`(agy
 - TIMEOUT: `TIMEOUT_SEC` 超過でプロセスツリーを kill(Windows は `taskkill /T /F`)。部分出力は保持される。
 - NONZERO_EXIT: exit code != 0。EMPTY_OUTPUT: exit 0 だが stdout が空白のみ。
 
+agy の `EMPTY_OUTPUT` は一時的な失敗を考慮し、既定で最大2回再試行する（初回を含め最大3回、待機は1秒・2秒）。`ask_agy` と `deliberate` の各ラウンドに適用し、同じプロンプト・実行枠を使う。全試行と待機で1つの `TIMEOUT_SEC` を共有し、次の待機時間が残らなければ再起動せず最後の `EMPTY_OUTPUT` を返す。実行中に時間切れになった場合は `TIMEOUT` を返す。その他のエラーと claude/codex は再試行しない。空の意見を成功扱いにはしない。
+
+`duration_ms` は待機を含む合計、stdout/stderr・文字数・切詰め情報は最後の試行のもの。`workdir_check` は全試行を集約し、途中で変更を検知したら最終結果も `changed`、変更未検知でも検査省略があれば `skipped`。子プロセスのファイル操作を巻き戻す機能はない。空出力のまま終わった場合の `error_message` には試行回数を含める。再試行・終了状況は MCP サーバーの stderr に `empty_output_retry` として記録する（プロンプト・応答本文は記録しない）。`AI_GOUGI_AGY_EMPTY_OUTPUT_RETRIES=0` で無効化できる。
+
+`EMPTY_OUTPUT` だけでは原因は確定しない。継続する場合は結果の stderr・終了コードと agy 自身のログを確認する。認証エラー等の `NONZERO_EXIT` を繰り返しても解決しないため、自動再試行の対象から除外している。
+agy の利用枠超過は `Individual quota reached` / `RESOURCE_EXHAUSTED (code 429)` が stderr に出ることがある。終了コードが非0なら `NONZERO_EXIT` として返すため、空出力の再試行では復旧しない。利用枠の回復・契約状況を確認する。
+
 DeliberateOutput.error_code: `INVALID_INPUT`, `THEME_TOO_LONG`, `BUSY`, `ALL_FAILED`。
 
 ## 4. 環境変数(既定値は ai_gougi/config.py)
@@ -88,7 +95,9 @@ DeliberateOutput.error_code: `INVALID_INPUT`, `THEME_TOO_LONG`, `BUSY`, `ALL_FAI
 |---|---|---|
 | WORKDIR | 起動時 cwd の絶対パス | 子プロセス cwd・スナップショット対象 |
 | BIN_claude / BIN_codex / BIN_agy | claude / codex / agy | 実行ファイル(PATH 解決) |
-| TIMEOUT_SEC | 600 | 1回の CLI 実行の上限 |
+| TIMEOUT_SEC | 600 | 1回の呼出しの実行上限（agy は再試行・待機を含む） |
+| AGY_EMPTY_OUTPUT_RETRIES | 2 | agy 空出力時の追加試行回数。0で無効、0以上の整数 |
+| AGY_RETRY_DELAY_SEC | 1 | agy 再試行の基準待機秒数。追加試行番号を掛ける（1秒、2秒…）。0以上の整数 |
 | KILL_WAIT_SEC | 5 | kill 後のパイプ閉鎖待ち |
 | TASKKILL_FLAGS | `/T /F` | Windows の taskkill 引数 |
 | CHILD_ENV_EXTRA | `PYTHONUTF8=1` | 子プロセスへ追加する環境変数(`K=V,K2=V2`)。空文字で無効 |
